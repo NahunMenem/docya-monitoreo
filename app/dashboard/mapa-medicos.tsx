@@ -118,10 +118,12 @@ export default function MapaMedicos() {
 
   return (
     <MapContainer
-      center={center}
+      center={center as [number, number]}
       zoom={12}
       style={{ height: "100%", width: "100%" }}
       className="z-0"
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      {...({} as any)}
     >
       <TileLayer
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
