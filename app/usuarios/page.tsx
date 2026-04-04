@@ -4,8 +4,10 @@ import Sidebar from "@/components/sidebar";
 import { useEffect, useState } from "react";
 import {
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Mail,
   Search,
   ShieldCheck,
@@ -25,13 +27,44 @@ export type Usuario = {
   telefono: string | null;
   role: string;
   validado: boolean;
-  created_at?: string;
+  created_at?: string | null;
+  pais?: string | null;
+  provincia?: string | null;
+  localidad?: string | null;
+  fecha_nacimiento?: string | null;
+  sexo?: string | null;
+  tipo_documento?: string | null;
+  numero_documento?: string | null;
+  direccion?: string | null;
   foto_url?: string | null;
   google_id?: string | null;
   auth_provider?: "google" | "email";
   perfil_completo?: boolean;
   acepta_terminos?: boolean;
+  acepto_condiciones?: boolean;
+  fecha_aceptacion?: string | null;
+  version_texto?: string | null;
 };
+
+function formatDate(value?: string | null) {
+  if (!value) return "—";
+  return new Date(value).toLocaleDateString("es-AR");
+}
+
+function DetailItem({ label, value }: { label: string; value?: string | null }) {
+  const displayValue = value && value.trim() ? value : "—";
+
+  return (
+    <div className="rounded-2xl p-3" style={{ background: "rgba(255,255,255,0.04)" }}>
+      <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: "var(--text-muted)" }}>
+        {label}
+      </p>
+      <p className="text-sm mt-1 break-words" style={{ color: "var(--text-primary)" }}>
+        {displayValue}
+      </p>
+    </div>
+  );
+}
 
 function ModalNuevoUsuario({
   open,
@@ -161,6 +194,7 @@ export default function UsuariosPage() {
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
 
   const fetchUsuarios = async () => {
     const query = encodeURIComponent(search.trim());
@@ -176,6 +210,7 @@ export default function UsuariosPage() {
 
   useEffect(() => {
     setPage(1);
+    setExpandedUserId(null);
   }, [search]);
 
   const toggleValidado = async (usuario: Usuario) => {
@@ -229,7 +264,8 @@ export default function UsuariosPage() {
                 Usuarios
               </h1>
               <p className="text-sm mt-2 max-w-2xl" style={{ color: "var(--text-secondary)" }}>
-                Acá podés revisar pacientes registrados, cuentas creadas con Google, foto de perfil, estado de validación y gestión administrativa.
+                Tocá cualquier paciente para desplegar su ficha completa, incluyendo acceso, foto,
+                documento, ubicación y estado de validación.
               </p>
             </div>
             <button onClick={() => setOpen(true)} className="btn-primary">
@@ -275,93 +311,176 @@ export default function UsuariosPage() {
                 </tr>
               </thead>
               <tbody>
-                {usuarios.map((u) => (
-                  <tr key={u.id}>
-                    <td>
-                      <div className="flex items-center gap-3 min-w-[250px]">
-                        {u.foto_url ? (
-                          <img
-                            src={u.foto_url}
-                            alt={u.full_name || u.email || "Usuario"}
-                            className="w-10 h-10 rounded-full object-cover border"
-                            style={{ borderColor: "var(--border-default)" }}
-                          />
-                        ) : (
-                          <div
-                            className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
-                            style={{
-                              background: "rgba(20,184,166,0.12)",
-                              color: "var(--brand-primary)",
-                              border: "1px solid rgba(20,184,166,0.2)",
-                            }}
-                          >
-                            {(u.full_name || u.email || "?").charAt(0).toUpperCase()}
+                {usuarios.map((u) => {
+                  const isExpanded = expandedUserId === u.id;
+
+                  return (
+                    <>
+                      <tr
+                        key={u.id}
+                        onClick={() => setExpandedUserId(isExpanded ? null : u.id)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <td>
+                          <div className="flex items-center gap-3 min-w-[250px]">
+                            {u.foto_url ? (
+                              <img
+                                src={u.foto_url}
+                                alt={u.full_name || u.email || "Usuario"}
+                                className="w-10 h-10 rounded-full object-cover border"
+                                style={{ borderColor: "var(--border-default)" }}
+                              />
+                            ) : (
+                              <div
+                                className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
+                                style={{
+                                  background: "rgba(20,184,166,0.12)",
+                                  color: "var(--brand-primary)",
+                                  border: "1px solid rgba(20,184,166,0.2)",
+                                }}
+                              >
+                                {(u.full_name || u.email || "?").charAt(0).toUpperCase()}
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="font-semibold truncate" style={{ color: "var(--text-primary)" }}>
+                                {u.full_name || "Sin nombre"}
+                              </p>
+                              <p
+                                className="text-xs truncate flex items-center gap-1"
+                                style={{ color: "var(--text-muted)" }}
+                              >
+                                <Mail size={12} />
+                                {u.email || "Sin email"}
+                              </p>
+                            </div>
+                            {isExpanded ? (
+                              <ChevronUp size={16} style={{ color: "var(--text-muted)" }} />
+                            ) : (
+                              <ChevronDown size={16} style={{ color: "var(--text-muted)" }} />
+                            )}
                           </div>
-                        )}
-                        <div className="min-w-0">
-                          <p className="font-semibold truncate" style={{ color: "var(--text-primary)" }}>
-                            {u.full_name || "Sin nombre"}
-                          </p>
-                          <p className="text-xs truncate flex items-center gap-1" style={{ color: "var(--text-muted)" }}>
-                            <Mail size={12} />
-                            {u.email || "Sin email"}
-                          </p>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <div className="flex flex-col gap-2">
-                        <ProviderBadge user={u} />
-                        {u.google_id ? (
-                          <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
-                            Vinculado con Google
-                          </span>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="font-mono text-xs">
-                      {u.dni || "—"}
-                    </td>
-                    <td className="text-xs">{u.telefono || "—"}</td>
-                    <td>
-                      <ValidationBadge ok={!!u.validado} />
-                    </td>
-                    <td>
-                      <div className="flex flex-col gap-1">
-                        <span className={`badge ${u.perfil_completo ? "badge-green" : "badge-yellow"}`}>
-                          {u.perfil_completo ? "Completo" : "Incompleto"}
-                        </span>
-                        <span className={`badge ${u.acepta_terminos ? "badge-teal" : "badge-red"}`}>
-                          {u.acepta_terminos ? "Términos OK" : "Sin términos"}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="text-xs" style={{ color: "var(--text-muted)" }}>
-                      {u.created_at ? new Date(u.created_at).toLocaleDateString("es-AR") : "—"}
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => toggleValidado(u)}
-                          disabled={busyId === u.id}
-                          className="btn-ghost !px-3 !py-2"
-                          title={u.validado ? "Desvalidar cuenta" : "Validar cuenta"}
-                        >
-                          <ShieldCheck size={15} />
-                        </button>
-                        <button
-                          onClick={() => borrarUsuario(u)}
-                          disabled={busyId === u.id}
-                          className="btn-ghost !px-3 !py-2"
-                          title="Eliminar usuario"
-                          style={{ color: "#f87171", borderColor: "rgba(248,113,113,0.22)" }}
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                        </td>
+                        <td>
+                          <div className="flex flex-col gap-2">
+                            <ProviderBadge user={u} />
+                            {u.google_id ? (
+                              <span className="text-[11px]" style={{ color: "var(--text-muted)" }}>
+                                Vinculado con Google
+                              </span>
+                            ) : null}
+                          </div>
+                        </td>
+                        <td className="font-mono text-xs">{u.dni || u.numero_documento || "—"}</td>
+                        <td className="text-xs">{u.telefono || "—"}</td>
+                        <td>
+                          <ValidationBadge ok={!!u.validado} />
+                        </td>
+                        <td>
+                          <div className="flex flex-col gap-1">
+                            <span className={`badge ${u.perfil_completo ? "badge-green" : "badge-yellow"}`}>
+                              {u.perfil_completo ? "Completo" : "Incompleto"}
+                            </span>
+                            <span className={`badge ${u.acepta_terminos ? "badge-teal" : "badge-red"}`}>
+                              {u.acepta_terminos ? "Términos OK" : "Sin términos"}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="text-xs" style={{ color: "var(--text-muted)" }}>
+                          {formatDate(u.created_at)}
+                        </td>
+                        <td>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleValidado(u);
+                              }}
+                              disabled={busyId === u.id}
+                              className="btn-ghost !px-3 !py-2"
+                              title={u.validado ? "Desvalidar cuenta" : "Validar cuenta"}
+                            >
+                              <ShieldCheck size={15} />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                borrarUsuario(u);
+                              }}
+                              disabled={busyId === u.id}
+                              className="btn-ghost !px-3 !py-2"
+                              title="Eliminar usuario"
+                              style={{ color: "#f87171", borderColor: "rgba(248,113,113,0.22)" }}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded ? (
+                        <tr key={`${u.id}-expanded`}>
+                          <td colSpan={8} style={{ paddingTop: 0 }}>
+                            <div
+                              className="m-3 rounded-[24px] p-4 md:p-5"
+                              style={{
+                                background: "linear-gradient(135deg, rgba(9,25,32,0.94), rgba(17,42,51,0.88))",
+                                border: "1px solid rgba(20,184,166,0.16)",
+                              }}
+                            >
+                              <div className="flex items-start justify-between gap-4 flex-wrap mb-4">
+                                <div>
+                                  <p
+                                    className="text-xs uppercase tracking-[0.22em]"
+                                    style={{ color: "var(--text-muted)" }}
+                                  >
+                                    Ficha del paciente
+                                  </p>
+                                  <h3 className="text-lg font-semibold mt-1" style={{ color: "var(--text-primary)" }}>
+                                    {u.full_name || "Sin nombre"}
+                                  </h3>
+                                  <p className="text-sm mt-1" style={{ color: "var(--text-secondary)" }}>
+                                    Perfil completo del usuario para revisión rápida desde monitoreo.
+                                  </p>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  <ProviderBadge user={u} />
+                                  <ValidationBadge ok={!!u.validado} />
+                                  <span className={`badge ${u.perfil_completo ? "badge-green" : "badge-yellow"}`}>
+                                    {u.perfil_completo ? "Perfil completo" : "Perfil incompleto"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                                <DetailItem label="Email" value={u.email} />
+                                <DetailItem label="Teléfono" value={u.telefono} />
+                                <DetailItem label="Documento" value={u.numero_documento || u.dni} />
+                                <DetailItem label="Tipo de documento" value={u.tipo_documento || (u.dni ? "dni" : null)} />
+                                <DetailItem label="País" value={u.pais} />
+                                <DetailItem label="Provincia" value={u.provincia} />
+                                <DetailItem label="Localidad" value={u.localidad} />
+                                <DetailItem label="Dirección" value={u.direccion} />
+                                <DetailItem label="Fecha de nacimiento" value={formatDate(u.fecha_nacimiento)} />
+                                <DetailItem label="Sexo" value={u.sexo} />
+                                <DetailItem label="Rol" value={u.role} />
+                                <DetailItem
+                                  label="Proveedor de acceso"
+                                  value={u.auth_provider || (u.google_id ? "google" : "email")}
+                                />
+                                <DetailItem label="Google ID" value={u.google_id} />
+                                <DetailItem label="Términos aceptados" value={u.acepta_terminos ? "Sí" : "No"} />
+                                <DetailItem label="Cuenta activada" value={u.acepto_condiciones ? "Sí" : "No"} />
+                                <DetailItem label="Versión de términos" value={u.version_texto} />
+                                <DetailItem label="Creado" value={formatDate(u.created_at)} />
+                                <DetailItem label="Fecha aceptación" value={formatDate(u.fecha_aceptacion)} />
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      ) : null}
+                    </>
+                  );
+                })}
               </tbody>
             </table>
 
