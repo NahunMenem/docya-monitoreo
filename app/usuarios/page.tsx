@@ -1,7 +1,7 @@
 "use client";
 
 import Sidebar from "@/components/sidebar";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   CheckCircle2,
   ChevronLeft,
@@ -163,7 +163,8 @@ export default function UsuariosPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const fetchUsuarios = async () => {
-    const res = await fetch(`${API}/monitoreo/usuarios?page=${page}&limit=15`);
+    const query = encodeURIComponent(search.trim());
+    const res = await fetch(`${API}/monitoreo/usuarios?page=${page}&limit=15&q=${query}`);
     const data = await res.json();
     setUsuarios(data.usuarios || []);
     setPages(data.pages || 1);
@@ -171,17 +172,11 @@ export default function UsuariosPage() {
 
   useEffect(() => {
     fetchUsuarios();
-  }, [page]);
+  }, [page, search]);
 
-  const filtrados = useMemo(
-    () =>
-      usuarios.filter((u) =>
-        `${u.full_name || ""} ${u.email || ""} ${u.dni || ""} ${u.telefono || ""}`
-          .toLowerCase()
-          .includes(search.toLowerCase()),
-      ),
-    [usuarios, search],
-  );
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   const toggleValidado = async (usuario: Usuario) => {
     setBusyId(usuario.id);
@@ -280,7 +275,7 @@ export default function UsuariosPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtrados.map((u) => (
+                {usuarios.map((u) => (
                   <tr key={u.id}>
                     <td>
                       <div className="flex items-center gap-3 min-w-[250px]">
@@ -370,10 +365,12 @@ export default function UsuariosPage() {
               </tbody>
             </table>
 
-            {filtrados.length === 0 && (
+            {usuarios.length === 0 && (
               <div className="py-12 text-center" style={{ color: "var(--text-muted)" }}>
                 <Users size={24} className="mx-auto mb-2 opacity-40" />
-                <p className="text-sm">No se encontraron usuarios</p>
+                <p className="text-sm">
+                  {search.trim() ? "No se encontraron usuarios para esa búsqueda" : "No se encontraron usuarios"}
+                </p>
               </div>
             )}
           </div>
