@@ -68,8 +68,17 @@ export default function MedicosPage() {
   const toggleAcceso = async (m: Medico) => {
     setLoadingId(m.id);
     try {
-      await fetch(`${API}/auth/validar_medico/${m.id}`, { method: "POST" });
+      const res = await fetch(`${API}/auth/validar_medico/${m.id}`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || data?.error || "No se pudo actualizar el acceso del profesional");
+      }
+      if (data?.mensaje) {
+        alert(data.mensaje);
+      }
       fetchMedicos();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo actualizar el acceso del profesional");
     } finally {
       setLoadingId(null);
     }
