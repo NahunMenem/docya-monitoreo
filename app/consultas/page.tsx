@@ -51,27 +51,56 @@ const estadosList = [
 
 export default function ConsultasPage() {
   const hoy = new Date().toISOString().slice(0, 10);
-  const [desde, setDesde] = useState(hoy);
-  const [hasta, setHasta] = useState(hoy);
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
+  const [appliedDesde, setAppliedDesde] = useState("");
+  const [appliedHasta, setAppliedHasta] = useState("");
   const [consultas, setConsultas] = useState<Consulta[]>([]);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [eliminarId, setEliminarId] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
+  const [pages, setPages] = useState(1);
+  const [total, setTotal] = useState(0);
 
-  const fetchConsultas = async () => {
+  const fetchConsultas = async (
+    targetPage = 1,
+    customDesde = appliedDesde,
+    customHasta = appliedHasta
+  ) => {
     setLoading(true);
     try {
-      let d = desde, h = hasta;
-      if (new Date(d) > new Date(h)) [d, h] = [h, d];
-      const res = await fetch(`${API}/monitoreo/consultas/?desde=${d}&hasta=${h}`);
+      let d = customDesde, h = customHasta;
+      if (d && h && new Date(d) > new Date(h)) [d, h] = [h, d];
+
+      const params = new URLSearchParams({
+        page: String(targetPage),
+        limit: "10",
+      });
+      if (d) params.set("desde", d);
+      if (h) params.set("hasta", h);
+
+      const res = await fetch(`${API}/monitoreo/consultas/?${params.toString()}`);
       const data = await res.json();
       setConsultas(data.consultas || []);
+      setPage(data.page || targetPage);
+      setPages(Math.max(data.pages || 1, 1));
+      setTotal(data.total || 0);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { fetchConsultas(); }, []);
+  useEffect(() => { fetchConsultas(1, "", ""); }, []);
+
+  const buscarConsultas = async () => {
+    let d = desde;
+    let h = hasta;
+    if (d && h && new Date(d) > new Date(h)) [d, h] = [h, d];
+    setAppliedDesde(d);
+    setAppliedHasta(h);
+    await fetchConsultas(1, d, h);
+  };
 
   const eliminarConsulta = async (id: number) => {
     try {
@@ -127,17 +156,17 @@ export default function ConsultasPage() {
               <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Desde</label>
               <div className="relative">
                 <Calendar size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--text-muted)" }} />
-                <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="field-input pl-8" />
+                <input type="date" value={desde} max={hoy} onChange={(e) => setDesde(e.target.value)} className="field-input pl-8" />
               </div>
             </div>
             <div>
               <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Hasta</label>
               <div className="relative">
                 <Calendar size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: "var(--text-muted)" }} />
-                <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="field-input pl-8" />
+                <input type="date" value={hasta} max={hoy} onChange={(e) => setHasta(e.target.value)} className="field-input pl-8" />
               </div>
             </div>
-            <button onClick={fetchConsultas} disabled={loading} className="btn-primary">
+            <button onClick={buscarConsultas} disabled={loading} className="btn-primary">
               {loading ? "Cargando..." : "Buscar"}
             </button>
           </div>
@@ -147,7 +176,7 @@ export default function ConsultasPage() {
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
           <div className="kpi-card col-span-1">
             <p className="text-xs mb-1" style={{ color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Total</p>
-            <p className="text-2xl font-bold" style={{ color: "var(--brand-primary)" }}>{consultas.length}</p>
+            <p className="text-2xl font-bold" style={{ color: "var(--brand-primary)" }}>{total}</p>
           </div>
           {estadosList.map(({ key, label, icon: Icon }) => (
             <div key={key} className="kpi-card">
@@ -243,6 +272,31 @@ export default function ConsultasPage() {
                 <p className="text-sm">No hay consultas para mostrar</p>
               </div>
             )}
+          </div>
+
+          <div
+            className="px-4 py-3 border-t flex items-center justify-between gap-3"
+            style={{ borderColor: "var(--border-subtle)" }}
+          >
+            <p className="text-xs" style={{ color: "var(--text-muted)" }}>
+              Página {page} de {pages} · {total} consultas
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => fetchConsultas(page - 1)}
+                disabled={loading || page <= 1}
+                className="btn-ghost px-3 py-1.5 text-sm disabled:opacity-50"
+              >
+                Anterior
+              </button>
+              <button
+                onClick={() => fetchConsultas(page + 1)}
+                disabled={loading || page >= pages}
+                className="btn-primary px-3 py-1.5 text-sm disabled:opacity-50"
+              >
+                Siguiente
+              </button>
+            </div>
           </div>
         </div>
       </main>

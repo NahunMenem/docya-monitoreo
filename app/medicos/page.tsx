@@ -70,8 +70,16 @@ export default function MedicosPage() {
 
   const eliminarMedico = async (m: Medico) => {
     if (!confirm(`¿Eliminar a ${m.full_name}?`)) return;
-    await fetch(`${API}/monitoreo/medicos/${m.id}`, { method: "DELETE" });
-    fetchMedicos();
+    try {
+      const res = await fetch(`${API}/monitoreo/medicos/${m.id}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || data?.error || "No se pudo eliminar el profesional");
+      }
+      fetchMedicos();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo eliminar el profesional");
+    }
   };
 
   const guardarEdicion = async () => {
