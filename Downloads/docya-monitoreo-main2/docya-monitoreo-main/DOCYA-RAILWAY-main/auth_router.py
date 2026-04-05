@@ -30,7 +30,15 @@ from sib_api_v3_sdk.rest import ApiException
 from unidecode import unidecode
 
 from database import get_db
-from settings import JWT_SECRET, create_access_token, now_argentina, pwd_context
+from settings import (
+    ARG_TZ,
+    CURRENT_ARGENTINA_WEEK_SQL,
+    JWT_SECRET,
+    create_access_token,
+    now_argentina,
+    pwd_context,
+    start_of_week_argentina,
+)
 
 templates = Jinja2Templates(directory="templates")
 router = APIRouter()
@@ -321,6 +329,49 @@ def enviar_email_validacion(email: str, medico_id: int, full_name: str):
         print(f"Error enviando email validación profesional: {exc}")
 
 
+def enviar_email_matricula_aprobada(email: str, full_name: str):
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="es"><head><meta charset="UTF-8"><title>Matrícula aprobada</title></head>
+    <body style="margin:0; padding:0; background-color:#F4F6F8; font-family: Arial, sans-serif;">
+      <table align="center" border="0" cellpadding="0" cellspacing="0" width="100%" bgcolor="#F4F6F8" style="padding:20px 0;">
+        <tr><td align="center">
+          <table border="0" cellpadding="0" cellspacing="0" width="600" style="background:#ffffff; border-radius:10px; box-shadow:0 2px 6px rgba(0,0,0,0.1);">
+            <tr><td align="center" style="padding:34px 28px;">
+              <img src="https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/docyapro_1_uxxdjx.png" alt="DocYa Pro" style="max-width:180px; margin-bottom:20px;">
+              <h2 style="color:#00A8A8; font-size:24px; margin:0 0 14px;">Tu matrícula ya fue aprobada</h2>
+              <p style="color:#334155; font-size:16px; line-height:1.6; margin:0 0 14px;">
+                Hola <strong>{full_name}</strong>, revisamos tu documentación y tu cuenta profesional ya quedó habilitada.
+              </p>
+              <p style="color:#334155; font-size:15px; line-height:1.6; margin:0 0 24px;">
+                Desde este momento ya podés ingresar a <strong>DocYa Pro</strong>, acceder a la app y comenzar a usar tus herramientas clínicas.
+              </p>
+              <div style="background:#ECFEFF; border:1px solid #A5F3FC; color:#155E75; border-radius:8px; padding:16px 18px; margin:0 0 24px; text-align:left;">
+                <strong>Importante:</strong> si ya tenés la app instalada, simplemente volvé a abrirla e iniciá sesión con tu cuenta.
+              </div>
+              <a href="https://docya.online" target="_blank" style="background-color:#00A8A8; color:#ffffff; padding:14px 28px; text-decoration:none; border-radius:6px; font-size:15px; font-weight:bold; display:inline-block;">Ingresar a DocYa</a>
+              <p style="color:#64748B; font-size:13px; line-height:1.5; margin:28px 0 0;">
+                Gracias por sumarte a DocYa. Nos alegra tenerte en el equipo.
+              </p>
+            </td></tr>
+          </table>
+        </td></tr>
+      </table>
+    </body>
+    </html>
+    """
+    email_data = SendSmtpEmail(
+        to=[{"email": email, "name": full_name}],
+        sender={"email": "nahundeveloper@gmail.com", "name": "DocYa Pro"},
+        subject="Tu matrícula fue aprobada y tu acceso a DocYa Pro ya está habilitado",
+        html_content=html_content,
+    )
+    try:
+        _brevo_client().send_transac_email(email_data)
+    except ApiException as exc:
+        print(f"Error enviando email aprobación profesional: {exc}")
+
+
 @router.post("/auth/register")
 def register(request: Request, data: RegisterIn, db=Depends(get_db)):
     """Alta de paciente con envío de mail de activación."""
@@ -412,10 +463,6 @@ def get_user_by_id(user_id: str, db=Depends(get_db)):
     """Detalle de paciente con métricas básicas para perfil."""
     try:
         _ensure_user_profile_columns(db)
-        google_password_hash = get_password_hash(
-            f"google-medico::{google_sub}::{email}"
-        )
-
         cur = db.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         user = cur.fetchone()
@@ -425,7 +472,9 @@ def get_user_by_id(user_id: str, db=Depends(get_db)):
         meses = 0
         if user.get("created_at"):
             try:
-                meses = (datetime.utcnow() - user["created_at"]).days // 30
+                created_at = user["created_at"]
+                created_at_arg = created_at.replace(tzinfo=ARG_TZ) if created_at.tzinfo is None else created_at.astimezone(ARG_TZ)
+                meses = (now_argentina() - created_at_arg).days // 30
             except Exception:
                 meses = 0
 
@@ -751,6 +800,10 @@ def auth_google_medico(data: GoogleAuthIn, db=Depends(get_db)):
         email = (payload.get("email") or "").lower().strip()
         full_name = (payload.get("name") or "Profesional DocYa").strip()
         google_picture = (payload.get("picture") or "").strip() or None
+        google_password_hash = get_password_hash(
+            f"google-medico::{google_sub or 'sin-sub'}::{email or 'sin-email'}"
+        )
+        provisional_matricula = f"GOOGLE-{(google_sub or email or 'PRO').upper()[:40]}"
         if not google_sub or not email:
             raise HTTPException(
                 status_code=400,
@@ -778,8 +831,7 @@ def auth_google_medico(data: GoogleAuthIn, db=Depends(get_db)):
                     email = %s,
                     full_name = COALESCE(NULLIF(full_name, ''), %s),
                     foto_perfil = COALESCE(NULLIF(foto_perfil, ''), %s),
-                    password_hash = COALESCE(password_hash, %s),
-                    validado = TRUE
+                    password_hash = COALESCE(password_hash, %s)
                 WHERE id = %s
                 RETURNING id, full_name, email, tipo, validado, matricula_validada,
                           perfil_completo, foto_perfil
@@ -798,10 +850,10 @@ def auth_google_medico(data: GoogleAuthIn, db=Depends(get_db)):
             cur.execute(
                 """
                 INSERT INTO medicos (
-                    full_name, email, password_hash, google_id, foto_perfil, tipo,
+                    full_name, email, password_hash, google_id, foto_perfil, tipo, matricula,
                     validado, matricula_validada, perfil_completo, acepta_terminos
                 )
-                VALUES (%s, %s, %s, %s, %s, 'medico', TRUE, FALSE, FALSE, FALSE)
+                VALUES (%s, %s, %s, %s, %s, 'medico', %s, FALSE, FALSE, FALSE, FALSE)
                 RETURNING id, full_name, email, tipo, validado, matricula_validada,
                           perfil_completo, foto_perfil
                 """,
@@ -811,6 +863,7 @@ def auth_google_medico(data: GoogleAuthIn, db=Depends(get_db)):
                     google_password_hash,
                     google_sub,
                     google_picture,
+                    provisional_matricula,
                 ),
             )
             medico = cur.fetchone()
@@ -913,7 +966,7 @@ def completar_perfil_medico(data: CompletarPerfilMedicoIn, db=Depends(get_db)):
             selfie_dni = %s,
             acepta_terminos = %s,
             perfil_completo = TRUE,
-            validado = TRUE,
+            validado = FALSE,
             updated_at = NOW()
         WHERE id = %s
         RETURNING id, full_name, email, tipo, validado, matricula_validada, perfil_completo
@@ -995,7 +1048,7 @@ def register_medico(data: RegisterMedicoIn, db=Depends(get_db)):
             provincia, localidad, dni, tipo_documento, numero_documento, direccion,
             acepta_terminos, perfil_completo, validado
         )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,FALSE)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE,FALSE)
         RETURNING id, full_name, tipo
         """,
         (
@@ -1061,14 +1114,20 @@ def activar_medico(token: str, request: Request, db=Depends(get_db)):
         medico_id = int(payload.get("sub"))
         cur = db.cursor()
         cur.execute(
-            "UPDATE medicos SET validado=TRUE, updated_at=NOW() WHERE id=%s RETURNING id, full_name",
+            "SELECT id, full_name FROM medicos WHERE id=%s",
             (medico_id,),
         )
         row = cur.fetchone()
-        db.commit()
         if not row:
             raise HTTPException(status_code=404, detail="Médico no encontrado")
-        return templates.TemplateResponse("activar_medico.html", {"request": request, "nombre": row[1]})
+        return templates.TemplateResponse(
+            "activar_medico.html",
+            {
+                "request": request,
+                "nombre": row[1],
+                "mensaje_extra": "Tu correo fue confirmado. Tu cuenta seguirá bloqueada hasta que DocYa valide tu matrícula y habilite el acceso.",
+            },
+        )
     except jwt.ExpiredSignatureError:
         return HTMLResponse("<h1>El enlace de activación expiró</h1>", status_code=400)
     except Exception as exc:
@@ -1096,9 +1155,15 @@ def login_medico(data: LoginMedicoIn, db=Depends(get_db)):
     if not pwd_context.verify(password, row[2]):
         raise HTTPException(status_code=400, detail="Contraseña incorrecta")
     if not row[3]:
-        raise HTTPException(status_code=403, detail="Cuenta aún no validada por correo")
+        raise HTTPException(
+            status_code=403,
+            detail="Tu cuenta profesional está en revisión. Te avisaremos por email cuando la matrícula sea aprobada y el acceso quede habilitado.",
+        )
     if not row[7]:
-        raise HTTPException(status_code=403, detail="Matrícula aún no validada por el equipo DocYa")
+        raise HTTPException(
+            status_code=403,
+            detail="Tu matrícula todavía no fue aprobada por el equipo DocYa.",
+        )
 
     token = create_access_token({"sub": str(row[0]), "email": row[5], "role": row[4]})
     return {
@@ -1126,22 +1191,54 @@ def login_medico(data: LoginMedicoIn, db=Depends(get_db)):
 
 @router.post("/auth/validar_medico/{medico_id}")
 def validar_medico(medico_id: int, db=Depends(get_db)):
-    """Activa o desactiva el flag de validación del profesional."""
-    cur = db.cursor()
+    """Habilita o bloquea el acceso profesional y sincroniza la aprobación de matrícula."""
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         """
-        UPDATE medicos
-        SET validado = NOT validado, updated_at=NOW()
-        WHERE id=%s
-        RETURNING id, full_name, tipo, validado
+        SELECT id, full_name, email, tipo, validado, matricula_validada
+        FROM medicos
+        WHERE id = %s
         """,
         (medico_id,),
     )
+    medico = cur.fetchone()
+    if not medico:
+        raise HTTPException(status_code=404, detail="Profesional no encontrado")
+
+    nuevo_estado = not bool(medico["validado"])
+    cur.execute(
+        """
+        UPDATE medicos
+        SET validado = %s,
+            matricula_validada = %s,
+            updated_at = NOW()
+        WHERE id = %s
+        RETURNING id, full_name, email, tipo, validado, matricula_validada
+        """,
+        (nuevo_estado, nuevo_estado, medico_id),
+    )
     row = cur.fetchone()
     db.commit()
-    if not row:
-        raise HTTPException(status_code=404, detail="Profesional no encontrado")
-    return {"ok": True, "medico_id": row[0], "nombre": row[1], "tipo": row[2], "validado": row[3]}
+
+    email_enviado = False
+    if row["validado"]:
+        enviar_email_matricula_aprobada(row["email"], row["full_name"])
+        email_enviado = True
+
+    return {
+        "ok": True,
+        "medico_id": row["id"],
+        "nombre": row["full_name"],
+        "tipo": row["tipo"],
+        "validado": bool(row["validado"]),
+        "matricula_validada": bool(row["matricula_validada"]),
+        "email_enviado": email_enviado,
+        "mensaje": (
+            "Acceso habilitado, matrícula aprobada y correo enviado al profesional."
+            if row["validado"]
+            else "Acceso bloqueado y matrícula marcada como no aprobada."
+        ),
+    }
 
 
 @router.post("/auth/medico/{medico_id}/foto")
@@ -1217,16 +1314,16 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
         raise HTTPException(status_code=404, detail="Profesional no encontrado")
 
     tipo = row[0].lower().strip()
-    inicio_semana = date.today() - timedelta(days=date.today().weekday())
+    inicio_semana = start_of_week_argentina()
     fin_semana = inicio_semana + timedelta(days=6)
 
     cur.execute(
-        """
+        f"""
         SELECT id, fin_atencion, metodo_pago
         FROM consultas
         WHERE medico_id = %s
         AND estado = 'finalizada'
-        AND DATE_TRUNC('week', fin_atencion) = DATE_TRUNC('week', CURRENT_DATE)
+        AND DATE_TRUNC('week', fin_atencion) = {CURRENT_ARGENTINA_WEEK_SQL}
         """,
         (medico_id,),
     )
@@ -1269,13 +1366,13 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
     metodo_frecuente = max(metodo_contador, key=metodo_contador.get) if metodo_contador else None
 
     cur.execute(
-        """
+        f"""
         SELECT COALESCE(metodo_pago, 'efectivo') AS metodo_pago,
                COUNT(*) AS cantidad,
                COALESCE(SUM(medico_neto), 0) AS total
         FROM pagos_consulta
         WHERE medico_id = %s
-        AND DATE_TRUNC('week', fecha) = DATE_TRUNC('week', CURRENT_DATE)
+        AND DATE_TRUNC('week', fecha) = {CURRENT_ARGENTINA_WEEK_SQL}
         GROUP BY metodo_pago
         """,
         (medico_id,),
