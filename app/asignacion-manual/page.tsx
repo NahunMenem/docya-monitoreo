@@ -61,8 +61,8 @@ function formatDateInput(date: Date) {
 
 export default function AsignacionManualPage() {
   const hoy = new Date();
-  const [desde, setDesde] = useState(formatDateInput(subDays(hoy, 7)));
-  const [hasta, setHasta] = useState(formatDateInput(hoy));
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
   const [consultas, setConsultas] = useState<Consulta[]>([]);
   const [medicos, setMedicos] = useState<Medico[]>([]);
   const [consultaSearch, setConsultaSearch] = useState("");
@@ -75,18 +75,22 @@ export default function AsignacionManualPage() {
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  const fetchConsultas = useCallback(async () => {
+  const fetchConsultas = useCallback(async (customDesde = desde, customHasta = hasta) => {
     setLoadingConsultas(true);
     try {
-      let fechaDesde = desde;
-      let fechaHasta = hasta;
-      if (new Date(fechaDesde) > new Date(fechaHasta)) {
-        [fechaDesde, fechaHasta] = [fechaHasta, fechaDesde];
-      }
+      let d = customDesde;
+      let h = customHasta;
+      if (d && h && new Date(d) > new Date(h)) [d, h] = [h, d];
 
-      const res = await fetch(`${API}/monitoreo/consultas/?desde=${fechaDesde}&hasta=${fechaHasta}`);
+      const params = new URLSearchParams({ limit: "200" });
+      if (d) params.set("desde", d);
+      if (h) params.set("hasta", h);
+
+      const res = await fetch(`${API}/monitoreo/consultas/?${params.toString()}`);
       const data = await res.json();
-      setConsultas(data.consultas || []);
+      setConsultas((data.consultas || []).filter(
+        (c: Consulta) => c.estado !== "finalizada" && c.estado !== "cancelada"
+      ));
     } finally {
       setLoadingConsultas(false);
     }
