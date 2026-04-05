@@ -82,15 +82,16 @@ export default function AsignacionManualPage() {
       let h = customHasta;
       if (d && h && new Date(d) > new Date(h)) [d, h] = [h, d];
 
-      const params = new URLSearchParams({ limit: "200" });
+      const params = new URLSearchParams({
+        limit: "500",
+        excluir_estados: "finalizada,cancelada",
+      });
       if (d) params.set("desde", d);
       if (h) params.set("hasta", h);
 
       const res = await fetch(`${API}/monitoreo/consultas/?${params.toString()}`);
       const data = await res.json();
-      setConsultas((data.consultas || []).filter(
-        (c: Consulta) => c.estado !== "finalizada" && c.estado !== "cancelada"
-      ));
+      setConsultas(data.consultas || []);
     } finally {
       setLoadingConsultas(false);
     }
