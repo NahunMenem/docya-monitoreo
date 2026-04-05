@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   Search, ShieldCheck, ShieldOff, Trash2, Pencil, MessageCircle,
@@ -18,10 +18,16 @@ type Medico = {
   especialidad: string;
   provincia: string;
   localidad: string;
+  dni?: string;
+  tipo_documento?: string;
+  numero_documento?: string;
+  direccion?: string;
+  acepta_terminos?: boolean;
   tipo: "medico" | "enfermero";
   validado: boolean;
   matricula_validada: boolean;
   ultimo_ping?: string | null;
+  created_at?: string;
   foto_perfil?: string;
   foto_dni_frente?: string;
   foto_dni_dorso?: string;
@@ -41,6 +47,7 @@ export default function MedicosPage() {
   const [fotoGrande, setFotoGrande] = useState<string | null>(null);
   const [editarMedico, setEditarMedico] = useState<Medico | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
+  const [expandedMedicoId, setExpandedMedicoId] = useState<number | null>(null);
 
   const fetchMedicos = async () => {
     const res = await fetch(`${API}/monitoreo/medicos_registrados`);
@@ -173,7 +180,15 @@ export default function MedicosPage() {
                 {medicosFiltrados.map((m) => {
                   const online = isOnline(m.ultimo_ping);
                   return (
-                    <tr key={m.id}>
+                    <Fragment key={m.id}>
+                    <tr
+                      className="cursor-pointer"
+                      onClick={() =>
+                        setExpandedMedicoId((current) =>
+                          current === m.id ? null : m.id
+                        )
+                      }
+                    >
                       <td>
                         <div className="flex items-center gap-3">
                           {m.foto_perfil ? (
@@ -219,7 +234,8 @@ export default function MedicosPage() {
                         <div className="flex items-center gap-1">
                           <button
                             title="WhatsApp"
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation();
                               const tel = m.telefono?.replace(/\D/g, "");
                               if (tel) window.open(`https://wa.me/${tel}`, "_blank");
                             }}
@@ -230,7 +246,10 @@ export default function MedicosPage() {
                           </button>
                           <button
                             title="Ver fotos"
-                            onClick={() => setFotoMedico(m)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFotoMedico(m);
+                            }}
                             className="p-1.5 rounded-md transition-colors"
                             style={{ color: "var(--text-muted)" }}
                             onMouseEnter={(e) => (e.currentTarget.style.color = "var(--brand-primary)")}
@@ -240,7 +259,10 @@ export default function MedicosPage() {
                           </button>
                           <button
                             title="Editar"
-                            onClick={() => setEditarMedico(m)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditarMedico(m);
+                            }}
                             className="p-1.5 rounded-md transition-colors"
                             style={{ color: "var(--text-muted)" }}
                             onMouseEnter={(e) => (e.currentTarget.style.color = "#60a5fa")}
@@ -250,7 +272,10 @@ export default function MedicosPage() {
                           </button>
                           <button
                             title={m.validado ? "Bloquear acceso" : "Habilitar acceso"}
-                            onClick={() => toggleAcceso(m)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleAcceso(m);
+                            }}
                             disabled={loadingId === m.id}
                             className="p-1.5 rounded-md transition-colors"
                             style={{ color: m.validado ? "#f87171" : "#4ade80" }}
@@ -259,7 +284,10 @@ export default function MedicosPage() {
                           </button>
                           <button
                             title="Eliminar"
-                            onClick={() => eliminarMedico(m)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              eliminarMedico(m);
+                            }}
                             className="p-1.5 rounded-md transition-colors hover:bg-red-500/10"
                             style={{ color: "var(--text-muted)" }}
                             onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
@@ -270,6 +298,50 @@ export default function MedicosPage() {
                         </div>
                       </td>
                     </tr>
+                    {expandedMedicoId === m.id && (
+                      <tr key={`${m.id}-expanded`}>
+                        <td colSpan={8} className="bg-white/5">
+                          <div className="grid gap-4 p-4 md:grid-cols-3">
+                            {[
+                              ["Email", m.email || "—"],
+                              ["Teléfono", m.telefono || "—"],
+                              ["Tipo documento", m.tipo_documento || "—"],
+                              ["Número documento", m.numero_documento || m.dni || "—"],
+                              ["Matrícula", m.matricula || "—"],
+                              ["Especialidad", m.especialidad || "—"],
+                              ["Dirección", m.direccion || "—"],
+                              ["Provincia", m.provincia || "—"],
+                              ["Localidad", m.localidad || "—"],
+                              ["Aceptó términos", m.acepta_terminos ? "Sí" : "No"],
+                              ["Acceso", m.validado ? "Habilitado" : "Bloqueado"],
+                              ["Matrícula validada", m.matricula_validada ? "Sí" : "No"],
+                              [
+                                "Registrado",
+                                m.created_at
+                                  ? new Date(m.created_at).toLocaleString("es-AR")
+                                  : "—",
+                              ],
+                            ].map(([label, value]) => (
+                              <div key={label}>
+                                <p
+                                  className="text-[11px] uppercase tracking-[0.08em]"
+                                  style={{ color: "var(--text-muted)" }}
+                                >
+                                  {label}
+                                </p>
+                                <p
+                                  className="mt-1 text-sm"
+                                  style={{ color: "var(--text-primary)" }}
+                                >
+                                  {value}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
