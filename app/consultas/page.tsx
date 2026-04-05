@@ -215,7 +215,7 @@ export default function ConsultasPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  {["ID", "Fecha", "Estado", "Paciente", "Profesional", "Tipo", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
+                  {["ID", "Fecha", "Estado", "Paciente", "Profesional", "Tipo consulta", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
                     <th key={h}>{h}</th>
                   ))}
                 </tr>
@@ -223,6 +223,8 @@ export default function ConsultasPage() {
               <tbody>
                 {filtradas.map((c) => {
                   const est = estadoConfig[c.estado] || { label: c.estado, badgeClass: "badge-teal" };
+                  const tipoLower = (c.tipo || "").toLowerCase();
+                  const esEnfermeria = tipoLower.includes("enfer");
                   return (
                     <tr key={c.id}>
                       <td className="font-mono text-xs" style={{ color: "var(--text-muted)" }}>#{c.id}</td>
@@ -230,7 +232,11 @@ export default function ConsultasPage() {
                       <td><span className={`badge ${est.badgeClass}`}>{est.label}</span></td>
                       <td className="font-medium" style={{ color: "var(--text-primary)" }}>{c.paciente}</td>
                       <td>{c.profesional}</td>
-                      <td className="capitalize">{c.tipo}</td>
+                      <td>
+                        <span className={`badge ${esEnfermeria ? "badge-blue" : "badge-teal"}`}>
+                          {esEnfermeria ? "Enfermería" : "Médica"}
+                        </span>
+                      </td>
                       <td className="capitalize">{c.metodo_pago}</td>
                       <td className="max-w-[180px] truncate text-xs">{c.direccion}</td>
                       <td className="text-center">{c.tiempo_llegada_min != null ? `${c.tiempo_llegada_min}m` : "—"}</td>
