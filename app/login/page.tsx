@@ -34,45 +34,81 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [googleReady, setGoogleReady] = useState(false);
+  const [googleLoadFailed, setGoogleLoadFailed] = useState(false);
   const googleButtonRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    if (!googleButtonRef.current || !window.google) return;
+    if (!googleButtonRef.current) return;
 
-    googleButtonRef.current.innerHTML = "";
-    window.google.accounts.id.initialize({
-      client_id: GOOGLE_CLIENT_ID,
-      callback: async ({ credential }) => {
-        if (!credential) {
-          setError("Google no devolvió una credencial válida");
-          return;
+    let cancelled = false;
+
+    const renderGoogleButton = () => {
+      if (cancelled || !googleButtonRef.current || !window.google) return false;
+
+      googleButtonRef.current.innerHTML = "";
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: async ({ credential }) => {
+          if (!credential) {
+            setError("Google no devolvió una credencial válida");
+            return;
+          }
+
+          setLoading(true);
+          setError(null);
+          try {
+            const data = await loginAdminWithGoogle(credential);
+            localStorage.setItem("docya_token", data.access_token);
+            localStorage.setItem("docya_admin", JSON.stringify(data.admin));
+            router.push("/dashboard");
+          } catch (err) {
+            setError(
+              err instanceof Error
+                ? err.message
+                : "No se pudo ingresar con Google"
+            );
+            setLoading(false);
+          }
+        },
+      });
+
+      window.google.accounts.id.renderButton(googleButtonRef.current, {
+        theme: "outline",
+        size: "large",
+        shape: "pill",
+        text: "continue_with",
+        width: 320,
+      });
+
+      setGoogleReady(true);
+      setGoogleLoadFailed(false);
+      return true;
+    };
+
+    if (renderGoogleButton()) return;
+
+    let attempts = 0;
+    const interval = window.setInterval(() => {
+      attempts += 1;
+      if (renderGoogleButton()) {
+        window.clearInterval(interval);
+        return;
+      }
+
+      if (attempts >= 20) {
+        window.clearInterval(interval);
+        if (!cancelled) {
+          setGoogleReady(false);
+          setGoogleLoadFailed(true);
         }
+      }
+    }, 300);
 
-        setLoading(true);
-        setError(null);
-        try {
-          const data = await loginAdminWithGoogle(credential);
-          localStorage.setItem("docya_token", data.access_token);
-          localStorage.setItem("docya_admin", JSON.stringify(data.admin));
-          router.push("/dashboard");
-        } catch (err) {
-          setError(
-            err instanceof Error
-              ? err.message
-              : "No se pudo ingresar con Google"
-          );
-          setLoading(false);
-        }
-      },
-    });
-
-    window.google.accounts.id.renderButton(googleButtonRef.current, {
-      theme: "outline",
-      size: "large",
-      shape: "pill",
-      text: "continue_with",
-      width: 320,
-    });
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -242,8 +278,22 @@ export default function LoginPage() {
           />
         </div>
 
-        <div className="flex justify-center">
+        <div className="flex flex-col items-center gap-3">
           <div ref={googleButtonRef} />
+          {!googleReady && (
+            <div
+              className="w-full rounded-xl px-4 py-3 text-center text-sm"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid var(--border-subtle)",
+                color: "var(--text-muted)",
+              }}
+            >
+              {googleLoadFailed
+                ? "No pudimos cargar el acceso con Google. Probá recargando la página."
+                : "Cargando acceso con Google..."}
+            </div>
+          )}
         </div>
 
         <p
