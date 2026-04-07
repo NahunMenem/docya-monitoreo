@@ -72,16 +72,60 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET")
 )
 
-service_account_info = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-credentials = service_account.Credentials.from_service_account_info(
-    service_account_info,
-    scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+FCM_SCOPE = ["https://www.googleapis.com/auth/firebase.messaging"]
+
+
+def _load_service_account_json(env_name: str) -> Optional[dict]:
+    raw = os.getenv(env_name, "").strip()
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+service_account_info = _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON") or {}
+service_account_info_pro = (
+    _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON_PRO")
+    or service_account_info
+)
+service_account_info_paciente = (
+    _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON_PACIENTE")
+    or service_account_info_pro
 )
 
-def get_access_token():
+
+def _build_fcm_credentials(service_info: dict | None):
+    if not service_info:
+        return None
+    return service_account.Credentials.from_service_account_info(
+        service_info,
+        scopes=FCM_SCOPE,
+    )
+
+
+fcm_credentials_map = {
+    "pro": _build_fcm_credentials(service_account_info_pro),
+    "paciente": _build_fcm_credentials(service_account_info_paciente),
+}
+
+
+def get_access_token(app_kind: str = "pro"):
+    kind = app_kind if app_kind in fcm_credentials_map else "pro"
+    credentials = fcm_credentials_map.get(kind) or fcm_credentials_map.get("pro")
+    if credentials is None:
+        raise RuntimeError("Firebase service account no configurada")
     request = google_requests.Request()
     credentials.refresh(request)
     return credentials.token
+
+
+def get_fcm_project_id(app_kind: str = "pro") -> str:
+    if app_kind == "paciente" and service_account_info_paciente:
+        return service_account_info_paciente["project_id"]
+    if service_account_info_pro:
+        return service_account_info_pro["project_id"]
+    if service_account_info:
+        return service_account_info["project_id"]
+    raise RuntimeError("Firebase project_id no configurado")
 
 # ====================================================
 # 🚀 CREAR APP FASTAPI
@@ -179,6 +223,107 @@ class PagoIn(BaseModel):
 background_tasks = set()
 
 @app.on_event("startup")
+async def auto_importar_medicamentos():
+    """
+    Fuente única: el CSV en /app/medicamentos/.
+    Si la cantidad en DB difiere del CSV → trunca y reimporta. Corre en background.
+    """
+    from medicamentos import MEDICAMENTOS_DIRS, _ensure_extended_schema, _build_csv_rows
+
+    def _run():
+        conn = None
+        try:
+            conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+            cur = conn.cursor()
+
+            # Asegurar tabla e índices
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS medicamentos (
+                    id                   SERIAL PRIMARY KEY,
+                    nombre_comercial     TEXT NOT NULL,
+                    nombre_completo      TEXT,
+                    principio_activo     TEXT[],
+                    principio_activo_str TEXT,
+                    laboratorio          TEXT,
+                    forma                TEXT,
+                    concentracion        TEXT,
+                    requiere_receta      BOOLEAN DEFAULT TRUE,
+                    categoria            TEXT,
+                    alertas              TEXT[],
+                    envases              TEXT[],
+                    codigo_alfabeta      INTEGER,
+                    presentacion         TEXT,
+                    pvp_pami             DOUBLE PRECISION,
+                    cobertura_pct        INTEGER,
+                    importe_afiliado     DOUBLE PRECISION
+                )
+            """)
+            _ensure_extended_schema(conn)
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_med_nombre_trgm ON medicamentos USING gin(nombre_comercial gin_trgm_ops)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_med_pa_trgm ON medicamentos USING gin(principio_activo_str gin_trgm_ops)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_med_codigo_alfabeta ON medicamentos(codigo_alfabeta)")
+            conn.commit()
+
+            # Buscar CSV
+            csv_path = None
+            for source_dir in MEDICAMENTOS_DIRS:
+                if not os.path.isdir(source_dir):
+                    continue
+                candidates = sorted(
+                    [os.path.join(source_dir, f) for f in os.listdir(source_dir) if f.lower().endswith(".csv")],
+                    key=os.path.getmtime, reverse=True
+                )
+                if candidates:
+                    csv_path = candidates[0]
+                    break
+
+            if not csv_path:
+                print("⚠️ auto_importar: no se encontró CSV en /app/medicamentos/")
+                return
+
+            # Leer CSV y comparar con DB
+            csv_rows = _build_csv_rows(csv_path)
+            cur.execute("SELECT COUNT(*) FROM medicamentos WHERE codigo_alfabeta IS NOT NULL")
+            db_csv_count = cur.fetchone()[0]
+
+            if db_csv_count == len(csv_rows):
+                print(f"💊 Medicamentos OK: {db_csv_count} registros del CSV ya en DB")
+                return
+
+            # Reimportar limpio desde el CSV
+            print(f"💊 Reimportando desde CSV ({len(csv_rows)} filas, DB tiene {db_csv_count})...")
+            cur.execute("TRUNCATE medicamentos RESTART IDENTITY")
+            conn.commit()
+
+            sql = """
+                INSERT INTO medicamentos
+                    (nombre_comercial, nombre_completo, principio_activo, principio_activo_str,
+                     laboratorio, forma, concentracion, requiere_receta, categoria, alertas, envases,
+                     codigo_alfabeta, presentacion, pvp_pami, cobertura_pct, importe_afiliado)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """
+            BATCH = 200
+            for i in range(0, len(csv_rows), BATCH):
+                cur.executemany(sql, csv_rows[i:i + BATCH])
+                conn.commit()  # commit por batch → datos visibles de inmediato
+            print(f"✅ Medicamentos importados: {len(csv_rows)} desde {csv_path}")
+
+        except Exception as exc:
+            print(f"⚠️ auto_importar_medicamentos error: {exc}")
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+        finally:
+            if conn:
+                conn.close()
+
+    asyncio.create_task(asyncio.to_thread(_run))
+
+
+@app.on_event("startup")
 async def iniciar_worker():
     task = asyncio.create_task(timeout_worker())
     background_tasks.add(task)
@@ -197,7 +342,7 @@ async def timeout_worker():
                 await procesar_timeouts(db)
                 enviados_pastillero = procesar_recordatorios_push_pastillero(
                     db,
-                    enviar_push,
+                    lambda *args, **kwargs: enviar_push(*args, app_kind="paciente", **kwargs),
                 )
                 if enviados_pastillero:
                     print(f"💊 Recordatorios push enviados: {enviados_pastillero}")
@@ -2742,7 +2887,7 @@ def aceptar_consulta(
 
     # 1️⃣ Obtener estado actual y pago
     cur.execute("""
-        SELECT estado, medico_id, mp_payment_id
+        SELECT estado, medico_id, mp_payment_id, paciente_uuid
         FROM consultas
         WHERE id = %s
     """, (consulta_id,))
@@ -2751,7 +2896,7 @@ def aceptar_consulta(
     if not row:
         raise HTTPException(status_code=404, detail="Consulta inexistente")
 
-    estado_actual, medico_actual, payment_id = row
+    estado_actual, medico_actual, payment_id, paciente_uuid = row
 
     # ❌ Consulta ya no disponible para este médico
     if estado_actual != "pendiente" or medico_actual != medico_id:
@@ -2791,7 +2936,39 @@ def aceptar_consulta(
 
     db.commit()
 
-    # 4️⃣ Capturar pago si corresponde
+    # 4️⃣ Avisar al paciente que ya tiene profesional asignado
+    try:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT u.fcm_token, m.full_name, m.tipo
+            FROM consultas c
+            JOIN users u ON u.id = c.paciente_uuid
+            JOIN medicos m ON m.id = c.medico_id
+            WHERE c.id = %s
+            """,
+            (consulta_id,),
+        )
+        paciente_push = cur.fetchone()
+        if paciente_push and paciente_push[0]:
+            enviar_push(
+                paciente_push[0],
+                "Profesional asignado",
+                f'{paciente_push[1] or "Tu profesional"} ya va en camino',
+                {
+                    "tipo": "consulta_asignada",
+                    "consulta_id": str(consulta_id),
+                    "paciente_uuid": str(paciente_uuid) if paciente_uuid else "",
+                    "estado": "aceptada",
+                    "profesional_tipo": (paciente_push[2] or "medico"),
+                },
+                app_kind="paciente",
+            )
+            print("📤 PUSH enviado al paciente (consulta aceptada)")
+    except Exception as e:
+        print("⚠️ Error enviando push al paciente tras aceptación:", e)
+
+    # 5️⃣ Capturar pago si corresponde
     if payment_id:
         try:
             url = f"https://api.mercadopago.com/v1/payments/{payment_id}/capture"
@@ -3258,14 +3435,29 @@ def enviar_push(
     android_channel_id: str = "default_channel_id",
     android_sound: str | None = None,
     apns_sound: str = "default",
+    time_sensitive: bool = False,
+    app_kind: str = "pro",
 ):
-    project_id = service_account_info["project_id"]
+    project_id = get_fcm_project_id(app_kind)
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
 
     headers = {
-        "Authorization": f"Bearer {get_access_token()}",
+        "Authorization": f"Bearer {get_access_token(app_kind)}",
         "Content-Type": "application/json; charset=UTF-8",
     }
+
+    # For time-sensitive pushes (e.g. medication reminders) use interruption-level timeSensitive
+    apns_headers = {
+        "apns-priority": "10",           # immediate delivery
+        "apns-push-type": "alert",       # required for iOS 13+
+    }
+    aps_payload: dict = {
+        "alert": {"title": titulo, "body": cuerpo},
+        "sound": apns_sound,
+        "badge": 1,
+    }
+    if time_sensitive:
+        aps_payload["interruption-level"] = "time-sensitive"
 
     payload = {
         "message": {
@@ -3286,6 +3478,7 @@ def enviar_push(
                 "priority": "high",
                 "notification": {
                     "channel_id": android_channel_id,
+                    "visibility": "public",
                     **({"sound": android_sound} if android_sound else {}),
                 }
             },
@@ -3294,15 +3487,9 @@ def enviar_push(
             # 🍏 iOS / APNS
             # ================================
             "apns": {
-                "headers": {
-                    "apns-priority": "10"  # entrega inmediata
-                },
+                "headers": apns_headers,
                 "payload": {
-                    "aps": {
-                        "alert": {"title": titulo, "body": cuerpo},
-                        "sound": apns_sound,
-                        "badge": 1
-                    }
+                    "aps": aps_payload,
                 }
             },
 
@@ -3628,6 +3815,35 @@ class RecetaIn(BaseModel):
     diagnostico: Optional[str] = None
     medicamentos: list[dict]
 
+
+def _render_consulta_medicamentos_html(medicamentos) -> str:
+    bloques = []
+    for idx, med in enumerate(medicamentos or [], 1):
+        if isinstance(med, dict):
+            nombre = str(med.get("nombre") or "MEDICAMENTO").strip()
+            dosis = str(med.get("dosis") or "").strip()
+            frecuencia = str(med.get("frecuencia") or "").strip()
+            duracion = str(med.get("duracion") or "").strip()
+        else:
+            nombre = str(med[0] or "MEDICAMENTO").strip()
+            dosis = str(med[1] or "").strip()
+            frecuencia = str(med[2] or "").strip()
+            duracion = str(med[3] or "").strip()
+
+        detalle_parts = [part.upper() for part in [dosis, frecuencia, duracion] if part]
+        detalle_html = (
+            f'<span class="med-det">{" &mdash; ".join(detalle_parts)}</span><br>'
+            if detalle_parts else ""
+        )
+        bloques.append(
+            f'<div class="med-rp"><span class="med-num">{idx})</span> '
+            f'<strong>{nombre.upper()}</strong><br>'
+            f'{detalle_html}'
+            f'<span class="med-cant">Cant: 1 (uno)</span></div>'
+        )
+
+    return "".join(bloques) or '<div class="med-rp"><strong>SIN MEDICACIÓN CARGADA</strong></div>'
+
 # --- POST: crear receta ---
 @app.post("/consultas/{consulta_id}/receta")
 def crear_receta(consulta_id: int, data: RecetaIn, db=Depends(get_db)):
@@ -3702,6 +3918,8 @@ def ver_receta_consulta(consulta_id: int, db=Depends(get_db)):
         WHERE receta_id = %s
     """, (receta_id,))
     medicamentos = cur.fetchall()
+    medicamentos_html = _render_consulta_medicamentos_html(medicamentos)
+    medicamentos_html = _render_consulta_medicamentos_html(medicamentos)
 
     # Asignar variables legibles
     obra_social = receta[1]
@@ -3775,8 +3993,25 @@ def ver_receta_consulta(consulta_id: int, db=Depends(get_db)):
           margin-bottom: 8px;
         }}
         .label {{ font-weight: bold; }}
-        ul {{ margin-left: 25px; }}
-        li {{ margin-bottom: 8px; }}
+        .med-rp {{
+          margin-bottom: 12px;
+          padding-left: 4px;
+          line-height: 1.6;
+        }}
+        .med-num {{
+          color: #14B8A6;
+          font-weight: 700;
+          margin-right: 6px;
+        }}
+        .med-det {{
+          color: #475569;
+          font-size: 14px;
+        }}
+        .med-cant {{
+          color: #334155;
+          font-size: 14px;
+          font-weight: 600;
+        }}
         .firma img {{ width: 160px; margin-top: 10px; }}
         .qr img {{ width: 90px; }}
         footer {{
@@ -3809,9 +4044,7 @@ def ver_receta_consulta(consulta_id: int, db=Depends(get_db)):
         <p>{diagnostico or '—'}</p>
 
         <div class="section-title">Rp / Indicaciones</div>
-        <ul>
-          {''.join([f"<li><b>{m[0]}</b>: {m[1]}, {m[2]}, {m[3]}</li>" for m in medicamentos])}
-        </ul>
+        <div>{medicamentos_html}</div>
 
         {firma_html}
 
@@ -4509,6 +4742,7 @@ def generar_receta_pdf_html(consulta_id: int, db=Depends(get_db)):
         WHERE r.consulta_id = %s
     """, (consulta_id,))
     medicamentos = cur.fetchall()
+    medicamentos_html = _render_consulta_medicamentos_html(medicamentos)
 
     fecha_str = creado_en.strftime("%d/%m/%Y %H:%M")
 
@@ -4547,9 +4781,24 @@ def generar_receta_pdf_html(consulta_id: int, db=Depends(get_db)):
                 margin-bottom: 5px;
                 font-size: 15px;
             }}
-            ul {{
-                margin: 0;
-                padding-left: 18px;
+            .med-rp {{
+                margin-bottom: 12px;
+                padding-left: 4px;
+                line-height: 1.6;
+            }}
+            .med-num {{
+                color: #14B8A6;
+                font-weight: 700;
+                margin-right: 6px;
+            }}
+            .med-det {{
+                color: #475569;
+                font-size: 14px;
+            }}
+            .med-cant {{
+                color: #334155;
+                font-size: 14px;
+                font-weight: 600;
             }}
             .firma {{
                 margin-top: 50px;
@@ -4602,9 +4851,7 @@ def generar_receta_pdf_html(consulta_id: int, db=Depends(get_db)):
         <p>{diagnostico or '—'}</p>
 
         <div class="titulo">Rp / Indicaciones</div>
-        <ul>
-            {''.join([f"<li><b>{m[0]}</b>: {m[1]}, {m[2]}, {m[3]}</li>" for m in medicamentos])}
-        </ul>
+        <div>{medicamentos_html}</div>
 
         <div class="firma">
             <p><b>Firma electrónica del profesional:</b></p>
@@ -4942,6 +5189,67 @@ def obtener_consulta(consulta_id: int, db=Depends(get_db)):
 
 
 
+
+
+# -----------------------------------------------------------------------
+# 🔍 CONSULTA ACTIVA DEL PACIENTE
+# Permite al splash/home de la app descubrir si hay una consulta en curso
+# sin depender del ID guardado localmente (que puede estar desactualizado).
+# -----------------------------------------------------------------------
+@app.get("/pacientes/{paciente_uuid}/consulta_activa")
+def consulta_activa_paciente(paciente_uuid: str, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT
+            c.id,
+            c.estado,
+            c.motivo,
+            c.direccion,
+            c.lat,
+            c.lng,
+            c.tipo,
+            c.medico_id,
+            m.full_name  AS medico_nombre,
+            m.matricula  AS medico_matricula,
+            m.latitud    AS medico_lat,
+            m.longitud   AS medico_lng,
+            c.tiempo_estimado_min
+        FROM consultas c
+        LEFT JOIN medicos m ON m.id = c.medico_id
+        WHERE c.paciente_uuid = %s
+          AND c.estado IN ('pendiente', 'aceptada', 'en_camino', 'en_domicilio', 'en_curso')
+        ORDER BY c.creado_en DESC
+        LIMIT 1
+    """, (paciente_uuid,))
+    row = cur.fetchone()
+    if not row:
+        return {"activa": False}
+
+    (cid, estado, motivo, direccion, lat, lng, tipo, medico_id,
+     medico_nombre, medico_matricula, medico_lat, medico_lng,
+     tiempo_estimado_raw) = row
+
+    try:
+        tiempo_estimado_min = int(round(float(tiempo_estimado_raw))) if tiempo_estimado_raw else 0
+    except Exception:
+        tiempo_estimado_min = 0
+
+    return {
+        "activa": True,
+        "id": cid,
+        "estado": estado,
+        "motivo": motivo,
+        "direccion": direccion,
+        "lat": lat,
+        "lng": lng,
+        "tipo": tipo,
+        "medico_id": medico_id,
+        "medico_nombre": medico_nombre,
+        "medico_matricula": medico_matricula,
+        "medico_lat": medico_lat,
+        "medico_lng": medico_lng,
+        "tiempo_estimado_min": tiempo_estimado_min,
+    }
 
 
 #valoraciones medicos -------------------------------------------------------------------------------
@@ -6068,11 +6376,24 @@ def ver_receta(receta_id: int, db=Depends(get_db)):
         p {{
           margin: 6px 0;
         }}
-        ul {{
-          margin: 10px 0 0 25px;
+        .med-rp {{
+          margin-bottom: 12px;
+          padding-left: 4px;
+          line-height: 1.6;
         }}
-        li {{
-          margin-bottom: 8px;
+        .med-num {{
+          color: #14B8A6;
+          font-weight: 700;
+          margin-right: 6px;
+        }}
+        .med-det {{
+          color: #475569;
+          font-size: 14px;
+        }}
+        .med-cant {{
+          color: #334155;
+          font-size: 14px;
+          font-weight: 600;
         }}
         .firma {{
           margin-top: 45px;
@@ -6123,12 +6444,7 @@ def ver_receta(receta_id: int, db=Depends(get_db)):
         <p>{receta['diagnostico'] or '—'}</p>
 
         <div class="section-title">Rp / Indicaciones</div>
-        <ul>
-          {''.join([
-            f"<li><b>{m['nombre']}</b>: {m['dosis']}, {m['frecuencia']}, {m['duracion']}</li>"
-            for m in medicamentos
-          ])}
-        </ul>
+        <div>{medicamentos_html}</div>
 
         <div class="firma">
           <p><span class="label">Firma digital:</span></p>
@@ -6262,7 +6578,8 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
                                 "consulta_id": str(consulta_id),
                                 "remitente_id": str(remitente_id),
                                 "mensaje": mensaje
-                            }
+                            },
+                            app_kind="pro" if remitente_tipo == "paciente" else "paciente",
                         )
 
                 except Exception as e:

@@ -96,7 +96,10 @@ class PacienteIn(BaseModel):
     paciente_uuid:   Optional[str] = None
 
 class MedicamentoItem(BaseModel):
-    nombre:         str                       # nombre_comercial o principio activo
+    nombre:         Optional[str] = None      # fallback legacy
+    ifa:            Optional[str] = None
+    nombre_comercial: Optional[str] = None
+    forma_farmaceutica: Optional[str] = None
     concentracion:  Optional[str] = None
     presentacion:   Optional[str] = None      # "Envase x 30 comprimidos"
     cantidad:       int = 1
@@ -112,6 +115,42 @@ class RecetaIn(BaseModel):
 
 class AnularIn(BaseModel):
     motivo: Optional[str] = None
+
+
+def _medicamento_campos(m: dict) -> tuple[str, str, str, str, str]:
+    ifa = (m.get("ifa") or m.get("principio_activo_str") or m.get("nombre") or "").strip()
+    nombre_comercial = (m.get("nombre_comercial") or "").strip()
+    forma = (m.get("forma_farmaceutica") or m.get("forma") or "").strip()
+    concentracion = (m.get("concentracion") or "").strip()
+    presentacion = (m.get("presentacion") or "").strip()
+
+    if nombre_comercial and ifa and nombre_comercial.lower() == ifa.lower():
+        nombre_comercial = ""
+
+    if not ifa:
+        ifa = nombre_comercial or "Medicamento"
+
+    return ifa, nombre_comercial, forma, concentracion, presentacion
+
+
+def _detalle_medicamento(forma: str, concentracion: str, presentacion: str) -> str:
+    forma_concentracion = " ".join(part for part in [forma, concentracion] if part).strip()
+    if not presentacion:
+        return forma_concentracion
+    if not forma_concentracion:
+        return presentacion
+
+    presentacion_norm = " ".join(presentacion.lower().split())
+    forma_norm = " ".join(forma_concentracion.lower().split())
+
+    if presentacion_norm == forma_norm:
+        return presentacion
+    if presentacion_norm.startswith(forma_norm):
+        return presentacion
+    if forma_norm.startswith(presentacion_norm):
+        return forma_concentracion
+
+    return f"{forma_concentracion} &mdash; {presentacion}"
 
 
 def _ensure_recetario_patient_columns(db) -> None:
@@ -897,7 +936,7 @@ def receta_html(
                r.obra_social, r.plan, r.nro_credencial, r.creado_en,
                p.nombre, p.apellido, p.tipo_documento, p.nro_documento,
                p.sexo, p.fecha_nacimiento, p.cuil,
-               m.full_name, m.matricula, m.especialidad, m.tipo, m.firma_url
+               m.full_name, m.matricula, m.especialidad, m.tipo, m.firma_url, m.direccion
         FROM recetario_recetas r
         JOIN recetario_pacientes p ON p.id = r.paciente_id
         JOIN medicos             m ON m.id = r.medico_id
@@ -911,7 +950,7 @@ def receta_html(
      obra_social, plan, nro_credencial, creado_en,
      pac_nombre, pac_apellido, tipo_doc, nro_doc,
      sexo, fecha_nac, cuil,
-     med_nombre, matricula, especialidad, tipo_med, firma_url) = row
+     med_nombre, matricula, especialidad, tipo_med, firma_url, direccion_medico) = row
 
     fecha_emision = creado_en.strftime("%d/%m/%Y") if creado_en else "&mdash;"
     fecha_nac_str = fecha_nac.strftime("%d/%m/%Y") if fecha_nac else "&mdash;"
@@ -920,17 +959,30 @@ def receta_html(
     meds_rp_html = ""
     meds_com_html = ""
     for i, m in enumerate(medicamentos or [], 1):
-        nombre = m.get("nombre", "")
-        concentracion = m.get("concentracion") or ""
-        presentacion = m.get("presentacion") or ""
+        ifa, nombre_comercial, forma, concentracion, presentacion = _medicamento_campos(m)
+        ifa = ifa.upper()
+        nombre_comercial = nombre_comercial.upper() if nombre_comercial else ""
+        forma = forma.upper() if forma else ""
+        concentracion = concentracion.upper() if concentracion else ""
+        presentacion = presentacion.upper() if presentacion else ""
         cantidad = m.get("cantidad", 1)
         indicaciones = m.get("indicaciones", "")
         cantidad_txt = {1: "uno", 2: "dos", 3: "tres", 4: "cuatro", 5: "cinco"}.get(int(cantidad), str(cantidad))
         indicaciones_html = indicaciones if indicaciones else '<em style="color:#aaa">Sin indicaciones</em>'
+        detalle = _detalle_medicamento(forma, concentracion, presentacion)
+        sugerido_html = (
+            f'<span class="med-brand">Marca sugerida: {nombre_comercial}</span><br>'
+            if nombre_comercial else ""
+        )
+        detalle_html = (
+            f'<span class="med-det">{detalle}</span><br>'
+            if detalle else ""
+        )
         meds_rp_html += (
             f'<div class="med-rp"><span class="med-num">{i})</span> '
-            f'<strong>{nombre}{(" " + concentracion) if concentracion else ""}</strong>'
-            f'{(" &mdash; " + presentacion) if presentacion else ""}<br>'
+            f'<strong>{ifa}</strong><br>'
+            f'{sugerido_html}'
+            f'{detalle_html}'
             f'<span class="med-cant">Cant: {cantidad} ({cantidad_txt})</span></div>'
         )
         meds_com_html += f'<div class="med-com"><span class="med-num">{i})</span> {indicaciones_html}</div>'
@@ -952,6 +1004,7 @@ def receta_html(
     logo_src = "https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/logo_1_svfdye.png"
     esp_label = "M&Eacute;DICO"
     mat_label = matricula or "&mdash;"
+    direccion_label = direccion_medico or "&mdash;"
     anulada_pill = "<span class='anulada-pill'>? ANULADA</span>" if estado == "anulada" else ""
     cred_bc_html = f'<img class="barcode" src="{bc_cred}" alt="Cred">' if bc_cred else ""
     cuil_html = f'<div class="pf"><label>CUIL</label><strong>{cuil}</strong></div>' if cuil else ""
@@ -975,6 +1028,7 @@ def receta_html(
           <strong>{med_nombre}</strong><br>
           {esp_label}<br>
           MN {mat_label}<br>
+          <span class="top-address">{direccion_label}</span><br>
           <span class="fecha-teal">{fecha_emision}</span>
         </div>
       </div>"""
@@ -1096,6 +1150,7 @@ body {{
 .logo {{ display: block; height: 21px; margin: 0 auto 2px; }}
 .copy-badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; background: linear-gradient(135deg, #0ae6c7, var(--teal-dark)); color: #fff; font-size: 6.5px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }}
 .top-info {{ text-align: right; font-size: 8px; line-height: 1.35; color: #374151; }}
+.top-address {{ display: inline-block; max-width: 88px; color: var(--muted); line-height: 1.25; }}
 .fecha-teal {{ color: var(--teal-dark); font-weight: 700; }}
 .pac-grid {{ display: flex; flex-wrap: wrap; margin-bottom: 5px; overflow: hidden; border: 1.5px solid var(--teal-dark); border-radius: 3px; }}
 .pf {{ flex: 1 1 33%; min-width: 0; padding: 2px 5px; border-right: 1px solid #ccfbf1; border-bottom: 1px solid #ccfbf1; }}
