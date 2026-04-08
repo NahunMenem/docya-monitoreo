@@ -25,10 +25,10 @@ type PreviewMedico = {
   medico: string;
   resumen: {
     cantidad_consultas: number;
-    total_efectivo: number;
-    total_digital: number;
-    docya_comision_total: number;
-    a_pagar_medico: number;
+    efectivo_cobrado: number;
+    comision_efectivo: number;
+    digital_neto_profesional: number;
+    saldo_actual: number;
   };
 };
 
@@ -270,6 +270,7 @@ export default function LiquidacionesPage() {
   const [liquidaciones, setLiquidaciones] = useState<Liquidacion[]>([]);
   const [loading, setLoading] = useState(false);
   const [liquidacionActiva, setLiquidacionActiva] = useState<Liquidacion | null>(null);
+  const [pagandoComisionId, setPagandoComisionId] = useState<number | null>(null);
 
   const loadPreview = () =>
     fetch(`${API}/monitoreo/liquidaciones/preview_semana_actual`)
@@ -296,12 +297,34 @@ export default function LiquidacionesPage() {
     }
   };
 
+  const registrarPagoComision = async (medicoId: number) => {
+    setPagandoComisionId(medicoId);
+    try {
+      const res = await fetch(`${API}/monitoreo/medicos/${medicoId}/registrar_pago_comision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || "No se pudo registrar el pago de comisión");
+      }
+      await loadPreview();
+    } finally {
+      setPagandoComisionId(null);
+    }
+  };
+
   // KPI aggregates
   const totalConsultas = preview.reduce((a, m) => a + m.resumen.cantidad_consultas, 0);
-  const totalDigital = preview.reduce((a, m) => a + m.resumen.total_digital, 0);
-  const totalEfectivo = preview.reduce((a, m) => a + m.resumen.total_efectivo, 0);
-  const totalDocyaPaga = preview.filter((m) => m.resumen.a_pagar_medico > 0).reduce((a, m) => a + m.resumen.a_pagar_medico, 0);
-  const totalDocyaCobra = preview.filter((m) => m.resumen.a_pagar_medico < 0).reduce((a, m) => a + Math.abs(m.resumen.a_pagar_medico), 0);
+  const totalDigital = preview.reduce((a, m) => a + m.resumen.digital_neto_profesional, 0);
+  const totalEfectivo = preview.reduce((a, m) => a + m.resumen.efectivo_cobrado, 0);
+  const totalDocyaPaga = preview
+    .filter((m) => m.resumen.saldo_actual > 0)
+    .reduce((a, m) => a + m.resumen.saldo_actual, 0);
+  const totalDocyaCobra = preview
+    .filter((m) => m.resumen.saldo_actual < 0)
+    .reduce((a, m) => a + Math.abs(m.resumen.saldo_actual), 0);
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
@@ -477,12 +500,13 @@ export default function LiquidacionesPage() {
                     DocYa le debe (80%)
                   </th>
                   <th className="text-center">Balance neto</th>
+                  <th className="text-center">Acción</th>
                 </tr>
               </thead>
               <tbody>
                 {preview.map((m) => {
-                  const debeADocya = m.resumen.docya_comision_total;
-                  const docyaLeDebe = m.resumen.total_digital * 0.8;
+                  const debeADocya = m.resumen.comision_efectivo;
+                  const docyaLeDebe = m.resumen.digital_neto_profesional;
                   return (
                     <tr key={m.medico_id}>
                       <td className="font-medium" style={{ color: "var(--text-primary)" }}>
@@ -492,7 +516,7 @@ export default function LiquidacionesPage() {
 
                       {/* Efectivo */}
                       <td className="text-center text-sm" style={{ color: "var(--text-secondary)" }}>
-                        {m.resumen.total_efectivo > 0 ? `$${fmt(m.resumen.total_efectivo)}` : "—"}
+                        {m.resumen.efectivo_cobrado > 0 ? `$${fmt(m.resumen.efectivo_cobrado)}` : "—"}
                       </td>
                       <td className="text-center">
                         {debeADocya > 0 ? (
@@ -506,7 +530,7 @@ export default function LiquidacionesPage() {
 
                       {/* Digital */}
                       <td className="text-center text-sm" style={{ color: "var(--text-secondary)" }}>
-                        {m.resumen.total_digital > 0 ? `$${fmt(m.resumen.total_digital)}` : "—"}
+                        {m.resumen.digital_neto_profesional > 0 ? `$${fmt(m.resumen.digital_neto_profesional)}` : "—"}
                       </td>
                       <td className="text-center">
                         {docyaLeDebe > 0 ? (
@@ -520,14 +544,33 @@ export default function LiquidacionesPage() {
 
                       {/* Balance neto */}
                       <td className="text-center">
-                        <BalanceBadge valor={m.resumen.a_pagar_medico} />
+                        <BalanceBadge valor={m.resumen.saldo_actual} />
+                      </td>
+                      <td className="text-center">
+                        {m.resumen.saldo_actual < 0 ? (
+                          <button
+                            onClick={() => registrarPagoComision(m.medico_id)}
+                            disabled={pagandoComisionId === m.medico_id}
+                            className="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg transition-colors"
+                            style={{
+                              background: "rgba(20,184,166,0.07)",
+                              color: "var(--brand-primary)",
+                              border: "1px solid rgba(20,184,166,0.18)",
+                              opacity: pagandoComisionId === m.medico_id ? 0.7 : 1,
+                            }}
+                          >
+                            {pagandoComisionId === m.medico_id ? "Registrando..." : "Pagó comisión"}
+                          </button>
+                        ) : (
+                          <span style={{ color: "var(--text-muted)" }}>—</span>
+                        )}
                       </td>
                     </tr>
                   );
                 })}
                 {preview.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="text-center py-10" style={{ color: "var(--text-muted)" }}>
+                    <td colSpan={8} className="text-center py-10" style={{ color: "var(--text-muted)" }}>
                       <AlertCircle size={20} className="mx-auto mb-2 opacity-40" />
                       No hay consultas registradas esta semana aún
                     </td>
