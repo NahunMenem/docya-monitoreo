@@ -264,7 +264,7 @@ export default function AsignacionManualPage() {
               <input type="date" value={hasta} onChange={(event) => setHasta(event.target.value)} className="field-input" />
             </div>
 
-            <button onClick={fetchConsultas} disabled={loadingConsultas} className="btn-primary">
+            <button onClick={() => fetchConsultas()} disabled={loadingConsultas} className="btn-primary">
               {loadingConsultas ? "Cargando..." : "Buscar consultas"}
             </button>
           </div>
