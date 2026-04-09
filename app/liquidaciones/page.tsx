@@ -32,6 +32,45 @@ type PreviewMedico = {
   };
 };
 
+function toNumber(value: unknown) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function normalizePreviewMedico(raw: unknown): PreviewMedico {
+  const row =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const resumen =
+    row.resumen && typeof row.resumen === "object"
+      ? (row.resumen as Record<string, unknown>)
+      : {};
+  const efectivoCobrado = toNumber(
+    resumen.efectivo_cobrado ?? resumen.total_efectivo,
+  );
+  const comisionEfectivo = toNumber(
+    resumen.comision_efectivo ??
+      (efectivoCobrado > 0 ? efectivoCobrado * 0.2 : 0),
+  );
+  const digitalNetoProfesional = toNumber(
+    resumen.digital_neto_profesional ?? resumen.total_digital,
+  );
+  const saldoActual = toNumber(
+    resumen.saldo_actual ?? resumen.a_pagar_medico,
+  );
+
+  return {
+    medico_id: toNumber(row.medico_id),
+    medico: String(row.medico ?? "Profesional"),
+    resumen: {
+      cantidad_consultas: toNumber(resumen.cantidad_consultas),
+      efectivo_cobrado: efectivoCobrado,
+      comision_efectivo: comisionEfectivo,
+      digital_neto_profesional: digitalNetoProfesional,
+      saldo_actual: saldoActual,
+    },
+  };
+}
+
 type Liquidacion = {
   id: number;
   medico: string;
@@ -44,7 +83,7 @@ type Liquidacion = {
 };
 
 function fmt(n: number) {
-  return n.toLocaleString("es-AR", { minimumFractionDigits: 0 });
+  return toNumber(n).toLocaleString("es-AR", { minimumFractionDigits: 0 });
 }
 
 // ─── Balance badge ────────────────────────────────────────────────────────────
@@ -275,7 +314,7 @@ export default function LiquidacionesPage() {
   const loadPreview = () =>
     fetch(`${API}/monitoreo/liquidaciones/preview_semana_actual`)
       .then((r) => r.json())
-      .then((d) => setPreview(d.medicos || []));
+      .then((d) => setPreview((d.medicos || []).map(normalizePreviewMedico)));
 
   const loadLiquidaciones = () =>
     fetch(`${API}/monitoreo/liquidaciones`)
