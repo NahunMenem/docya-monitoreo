@@ -6457,11 +6457,25 @@ def _sql_disponible_si_no_esta_en_consulta() -> str:
                 FROM consultas
                 WHERE medico_id = %s
                   AND estado IN ('aceptada', 'en_camino', 'en_domicilio')
+                  AND creado_en >= NOW() - INTERVAL '6 hours'
             )
             THEN disponible
             ELSE TRUE
         END
     """
+
+
+def _consulta_activa_bloqueante(cur, medico_id: int):
+    cur.execute("""
+        SELECT id, estado, creado_en
+        FROM consultas
+        WHERE medico_id = %s
+          AND estado IN ('aceptada', 'en_camino', 'en_domicilio')
+          AND creado_en >= NOW() - INTERVAL '6 hours'
+        ORDER BY creado_en DESC
+        LIMIT 1
+    """, (medico_id,))
+    return cur.fetchone()
 
 
 # ==========================================
@@ -6741,6 +6755,13 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
 
         disponible_actual = row[0]
         print(f"📍 Médico {medico_id} → lat/lng actualizado (disponible={disponible_actual})")
+
+        if not disponible_actual:
+            bloqueante = _consulta_activa_bloqueante(cur, medico_id)
+            if bloqueante:
+                print(f"Medico {medico_id} sigue no disponible por consulta activa {bloqueante[0]} estado={bloqueante[1]} creado_en={bloqueante[2]}")
+            else:
+                print(f"Medico {medico_id} quedo no disponible sin consulta activa reciente")
 
         # -------------------------------------------------------
         # 2️⃣ BUSCAR CONSULTA ACTIVA SOLO EN ESTADOS VÁLIDOS
@@ -8639,12 +8660,22 @@ def ping_medico(medico_id: int, db=Depends(get_db)):
                 activo = TRUE,
                 disponible = """ + _sql_disponible_si_no_esta_en_consulta() + """
             WHERE id = %s
+            RETURNING disponible
         """, (medico_id, medico_id))
+
+        row = cur.fetchone()
+        disponible_actual = row[0] if row else None
+        if disponible_actual is False:
+            bloqueante = _consulta_activa_bloqueante(cur, medico_id)
+            if bloqueante:
+                print(f"Ping medico {medico_id}: no disponible por consulta activa {bloqueante[0]} estado={bloqueante[1]} creado_en={bloqueante[2]}")
+            else:
+                print(f"Ping medico {medico_id}: quedo no disponible sin consulta activa reciente")
 
         db.commit()
         cur.close()
 
-        return {"ok": True}
+        return {"ok": True, "disponible": disponible_actual}
 
     except Exception as e:
         db.rollback()
