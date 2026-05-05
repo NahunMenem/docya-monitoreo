@@ -6,6 +6,9 @@ import os
 import json
 import math
 import jwt
+import base64
+import binascii
+from html import escape
 from urllib.parse import quote
 from datetime import datetime, timedelta, date, time
 import asyncio
@@ -62,6 +65,16 @@ from settings import (
 # ====================================================
 active_medicos: Dict[int, WebSocket] = {}
 active_chats: Dict[int, list[WebSocket]] = {}
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_ROUTES_API_KEY = os.getenv("GOOGLE_ROUTES_API_KEY", GOOGLE_API_KEY).strip()
+GOOGLE_ROUTES_THROTTLE_SECONDS = int(os.getenv("GOOGLE_ROUTES_THROTTLE_SECONDS", "60"))
+_eta_google_cache: Dict[int, dict] = {}
+PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS = int(
+    os.getenv("PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS", "300")
+)
+PRO_PRESENCE_OFFLINE_AFTER_SECONDS = int(
+    os.getenv("PRO_PRESENCE_OFFLINE_AFTER_SECONDS", "600")
+)
 
 # ====================================================
 # ☁️ CONFIGURACIÓN CLOUDINARY / FIREBASE
@@ -79,17 +92,46 @@ def _load_service_account_json(env_name: str) -> Optional[dict]:
     raw = os.getenv(env_name, "").strip()
     if not raw:
         return None
-    return json.loads(raw)
+    if raw.startswith("{"):
+        return json.loads(raw)
+    if os.path.exists(raw):
+        with open(raw, "r", encoding="utf-8") as f:
+            return json.load(f)
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        return json.loads(decoded)
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"{env_name} debe contener el JSON de service account, una ruta a un "
+            "archivo JSON o el JSON codificado en base64."
+        ) from exc
 
 
-service_account_info = _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON") or {}
-service_account_info_pro = (
-    _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON_PRO")
-    or service_account_info
+FCM_PROJECT_ID_PRO = os.getenv("FCM_PROJECT_ID_PRO", "docya-pro").strip()
+FCM_PROJECT_ID_PACIENTE = os.getenv(
+    "FCM_PROJECT_ID_PACIENTE", "docya-paciente"
+).strip()
+
+
+def _matches_project(service_info: dict | None, project_id: str) -> bool:
+    return bool(service_info and service_info.get("project_id") == project_id)
+
+
+service_account_info = _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+service_account_info_pro = _load_service_account_json(
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON_PRO"
+) or (
+    service_account_info
+    if not service_account_info
+    or _matches_project(service_account_info, FCM_PROJECT_ID_PRO)
+    else None
 )
-service_account_info_paciente = (
-    _load_service_account_json("GOOGLE_APPLICATION_CREDENTIALS_JSON_PACIENTE")
-    or service_account_info_pro
+service_account_info_paciente = _load_service_account_json(
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON_PACIENTE"
+) or (
+    service_account_info
+    if _matches_project(service_account_info, FCM_PROJECT_ID_PACIENTE)
+    else None
 )
 
 
@@ -110,22 +152,23 @@ fcm_credentials_map = {
 
 def get_access_token(app_kind: str = "pro"):
     kind = app_kind if app_kind in fcm_credentials_map else "pro"
-    credentials = fcm_credentials_map.get(kind) or fcm_credentials_map.get("pro")
+    credentials = fcm_credentials_map.get(kind)
     if credentials is None:
-        raise RuntimeError("Firebase service account no configurada")
+        raise RuntimeError(f"Firebase service account no configurada para {kind}")
     request = google_requests.Request()
     credentials.refresh(request)
     return credentials.token
 
 
 def get_fcm_project_id(app_kind: str = "pro") -> str:
-    if app_kind == "paciente" and service_account_info_paciente:
-        return service_account_info_paciente["project_id"]
-    if service_account_info_pro:
+    kind = app_kind if app_kind in fcm_credentials_map else "pro"
+    if kind == "paciente":
+        if service_account_info_paciente:
+            return service_account_info_paciente["project_id"]
+        raise RuntimeError("Firebase project_id no configurado para paciente")
+    if kind == "pro" and service_account_info_pro:
         return service_account_info_pro["project_id"]
-    if service_account_info:
-        return service_account_info["project_id"]
-    raise RuntimeError("Firebase project_id no configurado")
+    raise RuntimeError(f"Firebase project_id no configurado para {kind}")
 
 # ====================================================
 # 🚀 CREAR APP FASTAPI
@@ -1382,11 +1425,7 @@ def cancelar_busqueda(consulta_id: int, db=Depends(get_db)):
 
     # 3️⃣ Liberar médico si estaba asignado
     if medico_id:
-        cur.execute("""
-            UPDATE medicos
-            SET disponible = TRUE
-            WHERE id = %s
-        """, (medico_id,))
+        liberar_medico_si_presente(cur, medico_id)
 
     # 4️⃣ Cancelar consulta + limpiar reloj
     cur.execute("""
@@ -1877,10 +1916,22 @@ async def intentar_reasignar(
                 FROM medicos
                 WHERE
                     disponible = TRUE
+                    AND activo = TRUE
                     AND tipo = %s
+                    AND ultimo_ping IS NOT NULL
+                    AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
                     AND latitud IS NOT NULL
                     AND longitud IS NOT NULL
-            """, (lat, lng, lat, tipo))
+                    AND (
+                        (6371 * acos(
+                            cos(radians(%s)) *
+                            cos(radians(latitud)) *
+                            cos(radians(longitud) - radians(%s)) +
+                            sin(radians(%s)) *
+                            sin(radians(latitud))
+                        )) <= 10
+                    )
+            """, (lat, lng, lat, tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS, lat, lng, lat))
 
             # 3️⃣ Ordenar por cercanía
             medicos = sorted(cur.fetchall(), key=lambda x: x[3])
@@ -1906,7 +1957,7 @@ async def intentar_reasignar(
                         medico_id = %s,
                         estado = 'pendiente',
                         asignada_en = NOW(),
-                        expira_en = NOW() + INTERVAL '20 seconds'
+                        expira_en = NOW() + INTERVAL '30 seconds'
                     WHERE
                         id = %s
                         AND medico_id IS NULL
@@ -1961,12 +2012,20 @@ async def intentar_reasignar(
 
 async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
     """Encapsula la lógica de WS y Push para no ensuciar el motor"""
+    cur.execute(
+        "SELECT expira_en FROM consultas WHERE id = %s",
+        (consulta_id,),
+    )
+    row_expira = cur.fetchone()
+    expira_en = row_expira[0] if row_expira else None
+
     # WebSocket
     if medico_id in active_medicos:
         try:
             await active_medicos[medico_id]["ws"].send_json({
                 "tipo": "consulta_nueva",
-                "consulta_id": consulta_id
+                "consulta_id": consulta_id,
+                "expira_en": str(expira_en) if expira_en else None,
             })
             print("📤 WS enviado")
         except Exception as e:
@@ -1985,7 +2044,8 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
                     "tipo": "consulta_nueva",
                     "consulta_id": str(consulta_id),
                     "medico_id": str(medico_id),
-                    "origen": "reasignacion"
+                    "origen": "reasignacion",
+                    "expira_en": str(expira_en) if expira_en else "",
                 }
             )
             print("📤 PUSH enviado")
@@ -1996,16 +2056,65 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
 # ====================================================
 # ⏳ PROCESADOR DE TIMEOUTS BACKEND
 # ====================================================
-async def procesar_timeouts(db):
+def limpiar_medicos_disponibles_sin_ping(db) -> int:
     cur = db.cursor()
     try:
         cur.execute("""
-            SELECT id, medico_id
+            UPDATE medicos
+            SET disponible = FALSE,
+                activo = FALSE,
+                updated_at = NOW()
+            WHERE disponible = TRUE
+              AND (
+                ultimo_ping IS NULL
+                OR ultimo_ping < NOW() - (%s * INTERVAL '1 second')
+              )
+        """, (PRO_PRESENCE_OFFLINE_AFTER_SECONDS,))
+        count = cur.rowcount
+        db.commit()
+        if count:
+            print(f"🧭 Presencia: {count} profesionales sin ping marcados no disponibles")
+        return count
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Error limpiando presencia profesional: {exc}")
+        return 0
+    finally:
+        cur.close()
+
+
+def liberar_medico_si_presente(cur, medico_id: int) -> None:
+    cur.execute("""
+        UPDATE medicos
+        SET disponible = (
+                ultimo_ping IS NOT NULL
+                AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+            ),
+            activo = (
+                ultimo_ping IS NOT NULL
+                AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+            ),
+            updated_at = NOW()
+        WHERE id = %s
+    """, (
+        PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
+        PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
+        medico_id,
+    ))
+
+
+async def procesar_timeouts(db):
+    limpiar_medicos_disponibles_sin_ping(db)
+    cur = db.cursor()
+    try:
+        ahora_arg = now_argentina()
+        ahora_arg_naive = ahora_arg.replace(tzinfo=None)
+        cur.execute("""
+            SELECT id, medico_id, expira_en
             FROM consultas
             WHERE estado = 'pendiente'
               AND medico_id IS NOT NULL
               AND expira_en IS NOT NULL
-              AND expira_en < NOW()
         """)
         vencidas = cur.fetchall()
 
@@ -2013,8 +2122,28 @@ async def procesar_timeouts(db):
             db.rollback() # Limpieza de transacción idle
             return
 
-        for consulta_id, medico_id in vencidas:
-            print(f"⏳ Timeout BACKEND consulta {consulta_id} médico {medico_id}")
+        for consulta_id, medico_id, expira_en in vencidas:
+            if expira_en is None:
+                continue
+
+            expira_en_arg = (
+                expira_en.replace(tzinfo=ARG_TZ)
+                if expira_en.tzinfo is None
+                else expira_en.astimezone(ARG_TZ)
+            )
+            expira_en_cmp = (
+                expira_en
+                if expira_en.tzinfo is None
+                else expira_en_arg.replace(tzinfo=None)
+            )
+
+            if expira_en_cmp > ahora_arg_naive:
+                continue
+
+            print(
+                f"⏳ Timeout BACKEND consulta {consulta_id} médico {medico_id} "
+                f"| expira_en={expira_en_arg.isoformat()} | ahora_arg={ahora_arg.isoformat()}"
+            )
 
             # 1. Registrar intento fallido
             cur.execute("""
@@ -2023,7 +2152,7 @@ async def procesar_timeouts(db):
             """, (consulta_id, medico_id))
 
             # 2. Liberar médico
-            cur.execute("UPDATE medicos SET disponible = TRUE WHERE id = %s", (medico_id,))
+            liberar_medico_si_presente(cur, medico_id)
 
             # 3. Limpiar consulta (Reset para reasignación)
             cur.execute("""
@@ -2058,8 +2187,23 @@ class SolicitarConsultaIn(BaseModel):
     lat: float
     lng: float
     tipo: str = "medico"
-    metodo_pago: str
+    metodo_pago: str = "efectivo"
     consulta_id: int | None = None
+    canal_atencion: str = "domicilio"
+    modalidad: str | None = None
+
+
+class SolicitudWebRapidaIn(BaseModel):
+    full_name: str
+    telefono: str
+    direccion: str
+    lat: float
+    lng: float
+    motivo: str
+    email: EmailStr | None = None
+    tipo: str = "medico"
+    metodo_pago: str = "efectivo"
+    acepta_terminos: bool = True
 
 
 
@@ -2133,6 +2277,164 @@ def _validar_perfil_paciente_completo(db, paciente_uuid: str):
         )
 
 
+def _ensure_web_intake_columns(db):
+    """Agrega metadatos mínimos para distinguir el canal web del móvil."""
+    cur = db.cursor()
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS acquisition_channel TEXT")
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS canal_origen TEXT")
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS canal_atencion TEXT DEFAULT 'domicilio'")
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS video_url TEXT")
+    db.commit()
+
+
+def _ensure_teleconsulta_columns(db):
+    cur = db.cursor()
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS canal_atencion TEXT DEFAULT 'domicilio'")
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS video_url TEXT")
+    db.commit()
+
+
+def _normalizar_canal_atencion(data) -> str:
+    canal = (
+        getattr(data, "canal_atencion", None)
+        or getattr(data, "modalidad", None)
+        or "domicilio"
+    ).strip().lower()
+    if canal in {"teleconsulta", "online", "virtual", "video"}:
+        return "teleconsulta"
+    return "domicilio"
+
+
+def _build_video_url(consulta_id: int) -> str:
+    room = f"docya-teleconsulta-{consulta_id}-{uuid.uuid4().hex[:10]}"
+    return f"https://meet.jit.si/{room}"
+
+
+def _normalize_web_phone(value: str) -> str:
+    return "".join(ch for ch in (value or "") if ch.isdigit())
+
+
+def _build_web_lead_email(phone_digits: str) -> str:
+    suffix = phone_digits[-8:] if phone_digits else uuid.uuid4().hex[:8]
+    return f"web-{suffix}-{uuid.uuid4().hex[:8]}@web.docya.local"
+
+
+def _upsert_web_quick_patient(data: SolicitudWebRapidaIn, db) -> str:
+    """
+    Crea o reutiliza un paciente liviano exclusivo del canal web.
+    Así reutilizamos el flujo actual de consultas sin interferir con las
+    cuentas completas de la app móvil.
+    """
+    _ensure_web_intake_columns(db)
+
+    full_name = " ".join((data.full_name or "").strip().split())
+    telefono_digits = _normalize_web_phone(data.telefono)
+    direccion = (data.direccion or "").strip()
+    motivo = (data.motivo or "").strip()
+    tipo = (data.tipo or "").strip().lower()
+    metodo_pago = (data.metodo_pago or "").strip().lower()
+
+    if len(full_name) < 3:
+        raise HTTPException(status_code=400, detail="El nombre es obligatorio")
+    if len(telefono_digits) < 8:
+        raise HTTPException(status_code=400, detail="El teléfono es obligatorio")
+    if not direccion:
+        raise HTTPException(status_code=400, detail="La dirección es obligatoria")
+    if not motivo:
+        raise HTTPException(status_code=400, detail="El motivo es obligatorio")
+    if tipo not in {"medico", "enfermero"}:
+        raise HTTPException(status_code=400, detail="Tipo de profesional inválido")
+    if metodo_pago != "efectivo":
+        raise HTTPException(
+            status_code=400,
+            detail="El MVP web rápido solo soporta efectivo por ahora.",
+        )
+    if not data.acepta_terminos:
+        raise HTTPException(status_code=400, detail="Debes aceptar los términos para continuar")
+
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        """
+        SELECT id, email
+        FROM users
+        WHERE acquisition_channel = 'web_quick'
+          AND regexp_replace(COALESCE(telefono, ''), '\\D', '', 'g') = %s
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT 1
+        """,
+        (telefono_digits,),
+    )
+    existing = cur.fetchone()
+
+    email_value = (data.email or "").strip().lower() or None
+    if email_value:
+        cur.execute("SELECT id FROM users WHERE lower(email) = %s LIMIT 1", (email_value,))
+        email_in_use = cur.fetchone()
+        if email_in_use and (not existing or str(email_in_use["id"]) != str(existing["id"])):
+            email_value = None
+
+    if existing:
+        cur.execute(
+            """
+            UPDATE users
+            SET full_name = %s,
+                telefono = %s,
+                direccion = %s,
+                email = COALESCE(%s, email),
+                acepta_terminos = TRUE,
+                acepto_condiciones = TRUE,
+                fecha_aceptacion = COALESCE(fecha_aceptacion, NOW()),
+                validado = TRUE,
+                role = 'patient',
+                perfil_completo = TRUE,
+                acquisition_channel = 'web_quick'
+            WHERE id = %s
+            RETURNING id
+            """,
+            (full_name, telefono_digits, direccion, email_value, existing["id"]),
+        )
+        paciente_uuid = str(cur.fetchone()["id"])
+    else:
+        password_hash = pwd_context.hash(f"web-quick::{uuid.uuid4()}")
+        cur.execute(
+            """
+            INSERT INTO users (
+                email, full_name, password_hash, telefono, direccion,
+                acepta_terminos, acepto_condiciones, fecha_aceptacion,
+                validado, role, perfil_completo, acquisition_channel
+            )
+            VALUES (%s,%s,%s,%s,%s,TRUE,TRUE,NOW(),TRUE,'patient',TRUE,'web_quick')
+            RETURNING id
+            """,
+            (
+                email_value or _build_web_lead_email(telefono_digits),
+                full_name,
+                password_hash,
+                telefono_digits,
+                direccion,
+            ),
+        )
+        paciente_uuid = str(cur.fetchone()["id"])
+
+    cur.execute(
+        """
+        INSERT INTO direcciones (
+            user_id, direccion, lat, lng, telefono_contacto, fecha_actualizacion
+        )
+        VALUES (%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id) DO UPDATE SET
+            direccion = EXCLUDED.direccion,
+            lat = EXCLUDED.lat,
+            lng = EXCLUDED.lng,
+            telefono_contacto = EXCLUDED.telefono_contacto,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+        """,
+        (paciente_uuid, direccion, data.lat, data.lng, telefono_digits),
+    )
+    db.commit()
+    return paciente_uuid
+
+
 async def worker_busqueda_consulta_pendiente(
     consulta_id: int,
     tipo: str,
@@ -2165,6 +2467,7 @@ async def solicitar_consulta(
     db=Depends(get_db),
 ):
     cur = db.cursor()
+    _ensure_teleconsulta_columns(db)
     _validar_perfil_paciente_completo(db, str(data.paciente_uuid))
 
     # NORMALIZAR MÉTODO DE PAGO
@@ -2173,6 +2476,8 @@ async def solicitar_consulta(
     )
 
     consulta_id_previa = data.consulta_id
+    canal_atencion = _normalizar_canal_atencion(data)
+    direccion_consulta = data.direccion if canal_atencion == "domicilio" else "Teleconsulta DocYa"
 
     # Evita crear duplicados cuando el cliente reintenta o hace doble tap
     # sobre el flujo de efectivo. Si ya existe una consulta abierta muy reciente
@@ -2184,6 +2489,7 @@ async def solicitar_consulta(
             WHERE paciente_uuid = %s
               AND tipo = %s
               AND metodo_pago = 'efectivo'
+              AND COALESCE(canal_atencion, 'domicilio') = %s
               AND motivo = %s
               AND direccion = %s
               AND estado IN ('pendiente', 'aceptada', 'en_camino', 'en_domicilio')
@@ -2193,8 +2499,9 @@ async def solicitar_consulta(
         """, (
             str(data.paciente_uuid),
             data.tipo,
+            canal_atencion,
             data.motivo,
-            data.direccion,
+            direccion_consulta,
         ))
         consulta_existente = cur.fetchone()
 
@@ -2207,6 +2514,143 @@ async def solicitar_consulta(
                 "profesional": {"id": medico_existente_id} if medico_existente_id else None,
                 "duplicado": True,
             }
+
+    if canal_atencion == "teleconsulta":
+        cur.execute("""
+            SELECT id, full_name, tipo
+            FROM medicos
+            WHERE disponible = TRUE
+              AND activo = TRUE
+              AND tipo = %s
+              AND ultimo_ping IS NOT NULL
+              AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+            ORDER BY ultimo_ping DESC NULLS LAST
+            LIMIT 1
+        """, (data.tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS))
+        row = cur.fetchone()
+
+        if not row:
+            cur.execute("""
+                INSERT INTO consultas (
+                    paciente_uuid, medico_id, estado, motivo,
+                    direccion, lat, lng, metodo_pago, tipo,
+                    canal_atencion, asignada_en, expira_en
+                )
+                VALUES (%s,NULL,'pendiente',%s,%s,%s,%s,%s,%s,%s,NOW(), NOW() + INTERVAL '60 seconds')
+                RETURNING id, creado_en
+            """, (
+                str(data.paciente_uuid),
+                data.motivo,
+                direccion_consulta,
+                data.lat,
+                data.lng,
+                data.metodo_pago,
+                data.tipo,
+                canal_atencion,
+            ))
+            consulta_id, creado_en = cur.fetchone()
+            video_url = _build_video_url(consulta_id)
+            cur.execute("UPDATE consultas SET video_url = %s WHERE id = %s", (video_url, consulta_id))
+            db.commit()
+            return {
+                "consulta_id": consulta_id,
+                "estado": "pendiente",
+                "mensaje": "Seguimos buscando profesionales disponibles para teleconsulta.",
+                "profesional": None,
+                "canal_atencion": canal_atencion,
+                "video_url": video_url,
+            }
+
+        profesional_id, profesional_nombre, tipo = row
+        cur.execute("""
+            INSERT INTO consultas (
+                paciente_uuid, medico_id, estado, motivo,
+                direccion, lat, lng, metodo_pago, tipo,
+                canal_atencion, asignada_en, expira_en
+            )
+            VALUES (%s,%s,'pendiente',%s,%s,%s,%s,%s,%s,%s,NOW(), NOW() + INTERVAL '30 seconds')
+            RETURNING id, creado_en
+        """, (
+            str(data.paciente_uuid),
+            profesional_id,
+            data.motivo,
+            direccion_consulta,
+            data.lat,
+            data.lng,
+            data.metodo_pago,
+            data.tipo,
+            canal_atencion,
+        ))
+        consulta_id, creado_en = cur.fetchone()
+        video_url = _build_video_url(consulta_id)
+        cur.execute("UPDATE consultas SET video_url = %s WHERE id = %s", (video_url, consulta_id))
+        cur.execute("""
+            INSERT INTO intentos_asignacion (consulta_id, medico_id)
+            VALUES (%s, %s)
+        """, (consulta_id, profesional_id))
+        db.commit()
+
+        cur.execute("SELECT expira_en FROM consultas WHERE id = %s", (consulta_id,))
+        row_expira = cur.fetchone()
+        expira_en = row_expira[0] if row_expira else None
+
+        if profesional_id in active_medicos:
+            try:
+                pro = active_medicos[profesional_id]
+                cur.execute("SELECT full_name, telefono FROM users WHERE id=%s", (str(data.paciente_uuid),))
+                u = cur.fetchone()
+                await pro["ws"].send_json({
+                    "tipo": "consulta_nueva",
+                    "consulta_id": consulta_id,
+                    "paciente_uuid": str(data.paciente_uuid),
+                    "paciente_nombre": u[0] if u else "Paciente",
+                    "paciente_telefono": u[1] if u else "Sin numero",
+                    "motivo": data.motivo,
+                    "direccion": direccion_consulta,
+                    "lat": data.lat,
+                    "lng": data.lng,
+                    "distancia_km": None,
+                    "metodo_pago": data.metodo_pago,
+                    "profesional_tipo": tipo,
+                    "canal_atencion": canal_atencion,
+                    "video_url": video_url,
+                    "creado_en": str(creado_en),
+                    "expira_en": str(expira_en) if expira_en else None,
+                })
+            except Exception as e:
+                print("Error WS teleconsulta:", e)
+
+        cur.execute("SELECT fcm_token FROM medicos WHERE id=%s", (profesional_id,))
+        push_row = cur.fetchone()
+        if push_row and push_row[0]:
+            enviar_push(
+                push_row[0],
+                "Nueva teleconsulta disponible",
+                data.motivo,
+                {
+                    "tipo": "consulta_nueva",
+                    "consulta_id": str(consulta_id),
+                    "medico_id": str(profesional_id),
+                    "origen": "asignacion",
+                    "canal_atencion": canal_atencion,
+                    "video_url": video_url,
+                    "expira_en": str(expira_en) if expira_en else "",
+                },
+            )
+
+        return {
+            "consulta_id": consulta_id,
+            "paciente_uuid": str(data.paciente_uuid),
+            "profesional": {
+                "id": profesional_id,
+                "nombre": profesional_nombre,
+                "tipo": tipo,
+                "distancia_km": None,
+            },
+            "estado": "pendiente",
+            "canal_atencion": canal_atencion,
+            "video_url": video_url,
+        }
 
     # ============================================================
     # 🔵 TARJETA (ACTUALIZA CONSULTA EXISTENTE)
@@ -2225,6 +2669,8 @@ async def solicitar_consulta(
             WHERE disponible = TRUE
               AND activo = TRUE
               AND tipo = %s
+              AND ultimo_ping IS NOT NULL
+              AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
               AND latitud IS NOT NULL
               AND longitud IS NOT NULL
               AND (
@@ -2239,6 +2685,7 @@ async def solicitar_consulta(
         """, (
             data.lat, data.lng, data.lat,
             data.tipo,
+            PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
             data.lat, data.lng, data.lat
         ))
 
@@ -2289,7 +2736,7 @@ async def solicitar_consulta(
                 metodo_pago='tarjeta',
                 tipo=%s,
                 asignada_en = NOW(),
-                expira_en = NOW() + INTERVAL '20 seconds'
+                expira_en = NOW() + INTERVAL '30 seconds'
             WHERE id=%s
             RETURNING creado_en;
         """, (
@@ -2309,6 +2756,13 @@ async def solicitar_consulta(
             VALUES (%s, %s)
         """, (consulta_id_previa, profesional_id))
         db.commit()
+
+        cur.execute(
+            "SELECT expira_en FROM consultas WHERE id = %s",
+            (consulta_id_previa,),
+        )
+        row_expira = cur.fetchone()
+        expira_en = row_expira[0] if row_expira else None
 
         # ---------------------------------------------------------
         # 1) WS REAL TIME
@@ -2338,6 +2792,7 @@ async def solicitar_consulta(
                     "metodo_pago": "tarjeta",
                     "profesional_tipo": tipo,
                     "creado_en": str(creado_en),
+                    "expira_en": str(expira_en) if expira_en else None,
                 })
                 print("📤 WS enviado")
             except Exception as e:
@@ -2359,7 +2814,8 @@ async def solicitar_consulta(
                         "tipo": "consulta_nueva",
                         "consulta_id": str(consulta_id_previa),
                         "medico_id": str(profesional_id),
-                        "origen": "asignacion"
+                        "origen": "asignacion",
+                        "expira_en": str(expira_en) if expira_en else ""
                     }
                 )
                 print("📤 PUSH enviado (asignación directa)")
@@ -2394,6 +2850,12 @@ async def solicitar_consulta(
                 row = cur_wd.fetchone()
         
                 if row and row[0]:
+                    cur_wd.execute(
+                        "SELECT expira_en FROM consultas WHERE id = %s",
+                        (consulta_id_previa,),
+                    )
+                    row_expira = cur_wd.fetchone()
+                    expira_en = row_expira[0] if row_expira else None
                     try:
                         enviar_push(
                             row[0],
@@ -2403,7 +2865,8 @@ async def solicitar_consulta(
                                 "tipo": "consulta_nueva",
                                 "consulta_id": str(consulta_id_previa),
                                 "medico_id": str(profesional_id),
-                                "fallback": True
+                                "fallback": True,
+                                "expira_en": str(expira_en) if expira_en else "",
                             }
                         )
                         print("📤 PUSH fallback enviado")
@@ -2469,6 +2932,8 @@ async def solicitar_consulta(
         WHERE disponible = TRUE
           AND activo = TRUE
           AND tipo = %s
+          AND ultimo_ping IS NOT NULL
+          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
           AND (
@@ -2483,6 +2948,7 @@ async def solicitar_consulta(
     """, (
         data.lat, data.lng, data.lat,        # cálculo distancia (SELECT)
         data.tipo,
+        PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
         data.lat, data.lng, data.lat         # filtro radio <= 10 km (WHERE)
     ))
 
@@ -2494,9 +2960,10 @@ async def solicitar_consulta(
         cur.execute("""
             INSERT INTO consultas (
                 paciente_uuid, medico_id, estado, motivo,
-                direccion, lat, lng, metodo_pago, tipo
+                direccion, lat, lng, metodo_pago, tipo,
+                asignada_en, expira_en
             )
-            VALUES (%s,NULL,'pendiente',%s,%s,%s,%s,%s,%s)
+            VALUES (%s,NULL,'pendiente',%s,%s,%s,%s,%s,%s,NOW(), NOW() + INTERVAL '60 seconds')
             RETURNING id, creado_en
         """, (
             str(data.paciente_uuid),
@@ -2512,11 +2979,17 @@ async def solicitar_consulta(
         db.commit()
 
         print("⚠️ Consulta sin médico disponible")
+        background_tasks.add_task(
+            worker_busqueda_consulta_pendiente,
+            consulta_id,
+            data.tipo,
+        )
         asyncio.create_task(notificar_consulta_nueva_telegram(consulta_id, False))
 
         return {
             "consulta_id": consulta_id,
             "estado": "pendiente",
+            "mensaje": "Seguimos buscando profesionales disponibles durante los próximos segundos.",
             "profesional": None
         }
 
@@ -2541,7 +3014,7 @@ async def solicitar_consulta(
             %s, %s, 'pendiente',
             %s, %s, %s, %s, %s,
             %s,
-            NOW(), NOW() + INTERVAL '20 seconds'
+            NOW(), NOW() + INTERVAL '30 seconds'
         )
         RETURNING id, creado_en
     """, (
@@ -2558,7 +3031,6 @@ async def solicitar_consulta(
     consulta_id, creado_en = cur.fetchone()
     db.commit()
 
-
     print(f"🟢 Consulta {consulta_id} asignada a {profesional_id}")
 
     # Registrar intento
@@ -2567,6 +3039,13 @@ async def solicitar_consulta(
         VALUES (%s, %s)
     """, (consulta_id, profesional_id))
     db.commit()
+
+    cur.execute(
+        "SELECT expira_en FROM consultas WHERE id = %s",
+        (consulta_id,),
+    )
+    row_expira = cur.fetchone()
+    expira_en = row_expira[0] if row_expira else None
 
     # WS REAL TIME
     if profesional_id in active_medicos:
@@ -2586,6 +3065,7 @@ async def solicitar_consulta(
                 "metodo_pago": data.metodo_pago,
                 "profesional_tipo": tipo,
                 "creado_en": str(creado_en),
+                "expira_en": str(expira_en) if expira_en else None,
     
             })
             print("📤 WS enviado")
@@ -2608,7 +3088,8 @@ async def solicitar_consulta(
                     "tipo": "consulta_nueva",
                     "consulta_id": str(consulta_id),
                     "medico_id": str(profesional_id),
-                    "origen": "asignacion"
+                    "origen": "asignacion",
+                    "expira_en": str(expira_en) if expira_en else ""
                 }
             )
             print("📤 PUSH enviado (asignación directa)")
@@ -2643,6 +3124,12 @@ async def solicitar_consulta(
             row = cur_wd.fetchone()
     
             if row and row[0]:
+                cur_wd.execute(
+                    "SELECT expira_en FROM consultas WHERE id = %s",
+                    (consulta_id,),
+                )
+                row_expira = cur_wd.fetchone()
+                expira_en = row_expira[0] if row_expira else None
                 enviar_push(
                     row[0],
                     "📢 Nueva consulta",
@@ -2651,7 +3138,8 @@ async def solicitar_consulta(
                         "tipo": "consulta_nueva",
                         "consulta_id": str(consulta_id),
                         "medico_id": str(profesional_id),
-                        "fallback": True
+                        "fallback": True,
+                        "expira_en": str(expira_en) if expira_en else "",
                     }
                 )
                 print("📤 PUSH fallback enviado")
@@ -2706,6 +3194,45 @@ async def solicitar_consulta(
         },
         "estado": "pendiente"
     }
+
+
+@app.post("/web/consultas/solicitar")
+async def solicitar_consulta_web(
+    data: SolicitudWebRapidaIn,
+    background_tasks: BackgroundTasks,
+    db=Depends(get_db),
+):
+    """
+    Entrada web de baja fricción.
+    Reutiliza el mismo flujo de asignación que la app, pero con un paciente
+    liviano propio del canal web para no alterar el onboarding móvil.
+    """
+    paciente_uuid = _upsert_web_quick_patient(data, db)
+    payload = SolicitarConsultaIn(
+        paciente_uuid=UUID(paciente_uuid),
+        motivo=data.motivo.strip(),
+        direccion=data.direccion.strip(),
+        lat=data.lat,
+        lng=data.lng,
+        tipo=data.tipo.strip().lower(),
+        metodo_pago="efectivo",
+    )
+
+    result = await solicitar_consulta(payload, background_tasks, db)
+
+    consulta_id = result.get("consulta_id")
+    if consulta_id:
+        _ensure_web_intake_columns(db)
+        cur = db.cursor()
+        cur.execute(
+            "UPDATE consultas SET canal_origen = 'web_quick' WHERE id = %s",
+            (consulta_id,),
+        )
+        db.commit()
+
+    result["canal_origen"] = "web_quick"
+    result["paciente_uuid"] = paciente_uuid
+    return result
 
 
 
@@ -2769,11 +3296,11 @@ def consultas_mias(medico_id: int, db=Depends(get_db)):
     ]
 
 # --- Consulta asignada ---
-GOOGLE_API_KEY = "AIzaSyDVv_barlVwHJTgLF66dP4ESUffCBuS3uA"  # 🔒 Reemplazá con tu API Key real de Google Cloud
 
 
 @app.get("/consultas/asignadas/{medico_id}")
 def consultas_asignadas(medico_id: int, db=Depends(get_db)):
+    _ensure_teleconsulta_columns(db)
     cur = db.cursor()
     cur.execute("""
         SELECT c.id, c.paciente_uuid,
@@ -2782,7 +3309,10 @@ def consultas_asignadas(medico_id: int, db=Depends(get_db)):
                c.motivo, c.direccion, c.lat, c.lng, c.estado,
                m.latitud, m.longitud,
                m.tipo,
-               c.creado_en     -- 🔥 AGREGADO AQUÍ
+               c.creado_en,
+               c.expira_en,
+               COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+               c.video_url
         FROM consultas c
         JOIN medicos m ON c.medico_id = m.id
         LEFT JOIN users u ON c.paciente_uuid = u.id
@@ -2800,7 +3330,7 @@ def consultas_asignadas(medico_id: int, db=Depends(get_db)):
         consulta_id, paciente_uuid, paciente_nombre, paciente_telefono,
         motivo, direccion, lat, lng, estado,
         med_lat, med_lng, tipo_profesional,
-        creado_en                      # 🔥 RECIBIDO AQUÍ
+        creado_en, expira_en, canal_atencion, video_url
     ) = row
 
     distancia_km = None
@@ -2832,7 +3362,10 @@ def consultas_asignadas(medico_id: int, db=Depends(get_db)):
         "lng": lng,
         "estado": estado,
         "tipo": tipo_profesional,
-        "creado_en": str(creado_en),     # 🔥 ENVIADO AL FRONT AQUÍ
+        "canal_atencion": canal_atencion,
+        "video_url": video_url,
+        "creado_en": str(creado_en),
+        "expira_en": str(expira_en) if expira_en else None,
         "distancia_km": round(distancia_km, 2) if distancia_km else None,
         "tiempo_estimado_min": tiempo_min if tiempo_min is not None else 0
     }
@@ -2941,7 +3474,7 @@ def aceptar_consulta(
         cur = db.cursor()
         cur.execute(
             """
-            SELECT u.fcm_token, m.full_name, m.tipo
+            SELECT u.fcm_token, m.full_name, m.tipo, COALESCE(c.canal_atencion, 'domicilio'), c.video_url
             FROM consultas c
             JOIN users u ON u.id = c.paciente_uuid
             JOIN medicos m ON m.id = c.medico_id
@@ -2954,13 +3487,19 @@ def aceptar_consulta(
             enviar_push(
                 paciente_push[0],
                 "Profesional asignado",
-                f'{paciente_push[1] or "Tu profesional"} ya va en camino',
+                (
+                    f'{paciente_push[1] or "Tu profesional"} acepto la teleconsulta'
+                    if paciente_push[3] == "teleconsulta"
+                    else f'{paciente_push[1] or "Tu profesional"} ya va en camino'
+                ),
                 {
                     "tipo": "consulta_asignada",
                     "consulta_id": str(consulta_id),
                     "paciente_uuid": str(paciente_uuid) if paciente_uuid else "",
                     "estado": "aceptada",
                     "profesional_tipo": (paciente_push[2] or "medico"),
+                    "canal_atencion": paciente_push[3] or "domicilio",
+                    "video_url": paciente_push[4] or "",
                 },
                 app_kind="paciente",
             )
@@ -3033,7 +3572,7 @@ async def rechazar_consulta(
         """, (consulta_id, medico_id))
 
         # 3️⃣ Liberar médico y limpiar consulta para que sea reasignable
-        cur.execute("UPDATE medicos SET disponible = TRUE WHERE id = %s", (medico_id,))
+        liberar_medico_si_presente(cur, medico_id)
         cur.execute("""
             UPDATE consultas
             SET medico_id = NULL,
@@ -3132,11 +3671,7 @@ async def timeout_consulta(consulta_id: int, data: dict, db=Depends(get_db)):
     """, (consulta_id, medico_id))
 
     # Liberar médico
-    cur.execute("""
-        UPDATE medicos
-        SET disponible = TRUE
-        WHERE id = %s
-    """, (medico_id,))
+    liberar_medico_si_presente(cur, medico_id)
 
     # Limpiar asignación (SIN tocar estado)
     cur.execute("""
@@ -3295,7 +3830,7 @@ def finalizar_consulta(consulta_id: int, db=Depends(get_db)):
     # ============================================================
     # 🔹 Liberar profesional
     # ============================================================
-    cur.execute("UPDATE medicos SET disponible = TRUE WHERE id = %s", (medico_id,))
+    liberar_medico_si_presente(cur, medico_id)
 
     # ============================================================
     # 🔥 REGISTRAR PAGO AUTOMÁTICAMENTE (SIN TestClient)
@@ -3431,13 +3966,24 @@ def enviar_push(
     fcm_token: str,
     titulo: str,
     cuerpo: str,
-    data: dict = {},
+    data: dict | None = None,
     android_channel_id: str = "default_channel_id",
     android_sound: str | None = None,
     apns_sound: str = "default",
     time_sensitive: bool = False,
     app_kind: str = "pro",
 ):
+    data = data or {}
+    tipo_push = str(data.get("tipo", ""))
+    if tipo_push == "consulta_nueva" and app_kind == "pro":
+        android_channel_id = "docya_consultas_v2"
+        android_sound = "docya_alert"
+        apns_sound = "alert.caf"
+    elif tipo_push == "nuevo_mensaje" and app_kind == "paciente":
+        android_channel_id = "docya_mensajes_v2"
+        android_sound = "alerta"
+        apns_sound = "alerta.caf"
+
     project_id = get_fcm_project_id(app_kind)
     url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
 
@@ -3811,52 +4357,375 @@ class RecetaIn(BaseModel):
     medico_id: int
     paciente_uuid: str
     obra_social: Optional[str] = None
+    plan: Optional[str] = None
     nro_credencial: Optional[str] = None
     diagnostico: Optional[str] = None
     medicamentos: list[dict]
 
 
-def _render_consulta_medicamentos_html(medicamentos) -> str:
-    bloques = []
+def _ensure_consulta_receta_schema(db) -> None:
+    cur = db.cursor()
+    cur.execute("ALTER TABLE recetas ADD COLUMN IF NOT EXISTS plan TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS ifa TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS nombre_comercial TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS forma_farmaceutica TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS concentracion TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS presentacion TEXT")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS cantidad INTEGER DEFAULT 1")
+    cur.execute("ALTER TABLE receta_items ADD COLUMN IF NOT EXISTS indicaciones TEXT")
+    db.commit()
+
+
+def _consulta_detalle_medicamento(forma: str, concentracion: str, presentacion: str) -> str:
+    forma_concentracion = " ".join(part for part in [forma, concentracion] if part).strip()
+    if not presentacion:
+        return forma_concentracion
+    if not forma_concentracion:
+        return presentacion
+
+    presentacion_norm = " ".join(presentacion.lower().split())
+    forma_norm = " ".join(forma_concentracion.lower().split())
+
+    if presentacion_norm == forma_norm:
+        return presentacion
+    if presentacion_norm.startswith(forma_norm):
+        return presentacion
+    if forma_norm.startswith(presentacion_norm):
+        return forma_concentracion
+
+    return f"{forma_concentracion} &mdash; {presentacion}"
+
+
+def _consulta_receta_item_campos(med) -> tuple[str, str, str, str, str, int, str]:
+    if isinstance(med, dict):
+        ifa = str(
+            med.get("ifa") or
+            med.get("principio_activo_str") or
+            med.get("principio_activo") or
+            med.get("nombre") or
+            "MEDICAMENTO"
+        ).strip()
+        nombre_comercial = str(med.get("nombre_comercial") or med.get("nombre") or "").strip()
+        forma = str(med.get("forma_farmaceutica") or med.get("forma") or "").strip()
+        concentracion = str(med.get("concentracion") or "").strip()
+        presentacion = str(med.get("presentacion") or "").strip()
+        cantidad = int(med.get("cantidad") or 1)
+        indicaciones = str(med.get("indicaciones") or "").strip()
+        dosis = str(med.get("dosis") or "").strip()
+        frecuencia = str(med.get("frecuencia") or "").strip()
+        duracion = str(med.get("duracion") or "").strip()
+        if not indicaciones:
+            indicaciones = ", ".join(
+                part for part in [dosis, frecuencia, duracion] if part
+            ).strip(", ")
+        if nombre_comercial and ifa and nombre_comercial.lower() == ifa.lower():
+            nombre_comercial = ""
+        return ifa, nombre_comercial, forma, concentracion, presentacion, cantidad, indicaciones
+    else:
+        if len(med) >= 8:
+            ifa = str(med[0] or "MEDICAMENTO").strip()
+            nombre_comercial = str(med[1] or "").strip()
+            forma = str(med[2] or "").strip()
+            concentracion = str(med[3] or "").strip()
+            presentacion = str(med[4] or "").strip()
+            cantidad = int(med[5] or 1)
+            indicaciones = str(med[6] or "").strip()
+            fallback_nombre = str(med[7] or "").strip()
+            if not ifa:
+                ifa = fallback_nombre or "MEDICAMENTO"
+            if nombre_comercial and ifa and nombre_comercial.lower() == ifa.lower():
+                nombre_comercial = ""
+            return ifa, nombre_comercial, forma, concentracion, presentacion, cantidad, indicaciones
+
+        nombre = str(med[0] or "MEDICAMENTO").strip()
+        dosis = str(med[1] or "").strip()
+        frecuencia = str(med[2] or "").strip()
+        duracion = str(med[3] or "").strip()
+        indicaciones = ", ".join(
+            part for part in [dosis, frecuencia, duracion] if part
+        ).strip(", ")
+        return nombre, "", "", dosis, "", 1, indicaciones
+
+def _render_consulta_medicamentos_html(medicamentos) -> tuple[str, str]:
+    bloques_rp = []
+    bloques_indicaciones = []
+    cantidad_textos = {1: "uno", 2: "dos", 3: "tres", 4: "cuatro", 5: "cinco"}
     for idx, med in enumerate(medicamentos or [], 1):
-        if isinstance(med, dict):
-            nombre = str(med.get("nombre") or "MEDICAMENTO").strip()
-            dosis = str(med.get("dosis") or "").strip()
-            frecuencia = str(med.get("frecuencia") or "").strip()
-            duracion = str(med.get("duracion") or "").strip()
-        else:
-            nombre = str(med[0] or "MEDICAMENTO").strip()
-            dosis = str(med[1] or "").strip()
-            frecuencia = str(med[2] or "").strip()
-            duracion = str(med[3] or "").strip()
-
-        detalle_parts = [part.upper() for part in [dosis, frecuencia, duracion] if part]
+        ifa, nombre_comercial, forma, concentracion, presentacion, cantidad, indicaciones = _consulta_receta_item_campos(med)
+        nombre_html = escape(ifa.upper())
+        detalle = _consulta_detalle_medicamento(
+            forma.upper(),
+            concentracion.upper(),
+            presentacion.upper(),
+        )
+        sugerido_html = (
+            f'<span class="med-brand">Marca sugerida: {escape(nombre_comercial.upper())}</span><br>'
+            if nombre_comercial else ""
+        )
         detalle_html = (
-            f'<span class="med-det">{" &mdash; ".join(detalle_parts)}</span><br>'
-            if detalle_parts else ""
+            f'<span class="med-det">{detalle}</span><br>'
+            if detalle else ""
         )
-        bloques.append(
+        indicaciones_html = (
+            escape(indicaciones)
+            if indicaciones else
+            '<em style="color:#aaa">Sin indicaciones</em>'
+        )
+        cantidad_txt = cantidad_textos.get(int(cantidad), str(cantidad))
+
+        bloques_rp.append(
             f'<div class="med-rp"><span class="med-num">{idx})</span> '
-            f'<strong>{nombre.upper()}</strong><br>'
+            f'<strong>{nombre_html}</strong><br>'
+            f'{sugerido_html}'
             f'{detalle_html}'
-            f'<span class="med-cant">Cant: 1 (uno)</span></div>'
+            f'<span class="med-cant">Cant: {cantidad} ({cantidad_txt})</span></div>'
+        )
+        bloques_indicaciones.append(
+            f'<div class="med-com"><span class="med-num">{idx})</span> {indicaciones_html}</div>'
         )
 
-    return "".join(bloques) or '<div class="med-rp"><strong>SIN MEDICACIÓN CARGADA</strong></div>'
+    rp_html = "".join(bloques_rp) or '<div class="med-rp"><strong>SIN MEDICACIÓN CARGADA</strong></div>'
+    indicaciones_html = "".join(bloques_indicaciones) or '<div class="med-com"><em style="color:#aaa">Sin indicaciones</em></div>'
+    return rp_html, indicaciones_html
+
+
+def _build_consulta_receta_html(
+    *,
+    receta_id: int,
+    medico_nombre: str,
+    especialidad: str,
+    matricula: str,
+    firma_url: str | None,
+    paciente_nombre: str,
+    paciente_dni: str | None,
+    obra_social: str | None,
+    plan: str | None,
+    nro_credencial: str | None,
+    diagnostico: str | None,
+    creado_en,
+    medicamentos,
+    verification_url: str,
+) -> str:
+    meds_rp_html, meds_com_html = _render_consulta_medicamentos_html(medicamentos)
+    fecha_emision = creado_en.strftime("%d/%m/%Y %H:%M") if creado_en else "&mdash;"
+    qr_url = f"https://api.qrserver.com/v1/create-qr-code/?size=96x96&data={quote(verification_url, safe='')}"
+    firma_html = (
+        f'<img src="{escape(firma_url, quote=True)}" alt="Firma" class="firma-img">'
+        if firma_url else '<div class="firma-linea"></div>'
+    )
+    diagnostico_html = (
+        f'<div class="diag-row"><strong>Diagnóstico:</strong> {escape(diagnostico)}</div>'
+        if diagnostico else ""
+    )
+
+    medico_nombre_html = escape(medico_nombre or "—")
+    especialidad_html = escape(especialidad or "MÉDICO")
+    matricula_html = escape(matricula or "—")
+    paciente_nombre_html = escape(paciente_nombre or "—")
+    paciente_dni_html = escape(str(paciente_dni or "—"))
+    obra_social_html = escape(obra_social or "—")
+    plan_html = escape(plan or "—")
+    credencial_html = escape(nro_credencial or "—")
+    verification_url_html = escape(verification_url)
+
+    def _copy(badge: str, watermark_text: str = "") -> str:
+        watermark_html = f'<div class="watermark">{escape(watermark_text)}</div>' if watermark_text else ""
+        return f"""
+    <div class="copy">
+      {watermark_html}
+      <div class="top-strip">
+        <div class="top-center">
+          <img src="https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/logo_1_svfdye.png" class="logo" alt="DocYa">
+          <span class="copy-badge">{escape(badge)}</span>
+        </div>
+        <div class="top-info">
+          <strong>{medico_nombre_html}</strong><br>
+          {especialidad_html}<br>
+          MN {matricula_html}<br>
+          <span class="fecha-teal">{fecha_emision}</span>
+        </div>
+      </div>
+
+      <div class="pac-grid">
+        <div class="pf pf-name"><label>Paciente</label><strong>{paciente_nombre_html}</strong></div>
+        <div class="pf"><label>DNI</label><strong>{paciente_dni_html}</strong></div>
+        <div class="pf"><label>Obra Social</label><strong>{obra_social_html}</strong></div>
+        <div class="pf"><label>Plan</label><strong>{plan_html}</strong></div>
+        <div class="pf"><label>N° Credencial</label><strong>{credencial_html}</strong></div>
+      </div>
+
+      <div class="content-box">
+        <div class="col">
+          <div class="sec-title">Rp/</div>
+          {meds_rp_html}
+          {diagnostico_html}
+        </div>
+        <div class="inner-divider"></div>
+        <div class="col">
+          <div class="sec-title ind-title">Indicaciones:</div>
+          {meds_com_html}
+        </div>
+      </div>
+
+      <div class="sig-footer">
+        <div>
+          <p class="sig-legal">Este documento ha sido firmado electrónicamente por<br><strong>{medico_nombre_html}</strong><br>conforme Ley 25.506 de Firma Digital y Ley 27.553.</p>
+          <p class="sig-date">{fecha_emision}</p>
+        </div>
+        <div class="sig-right">
+          {firma_html}
+          <div class="firma-label">{medico_nombre_html}</div>
+          <div class="firma-sub">{especialidad_html} · MN {matricula_html}</div>
+          <div class="firma-stamp">FIRMA Y SELLO</div>
+        </div>
+      </div>
+
+      <div class="qr-strip">
+        <img src="{qr_url}" alt="QR" class="qr-img">
+        <div class="strip-info">
+          <strong>DocYa · Receta electrónica</strong><br>
+          {medico_nombre_html}<br>
+          <span class="strip-note">Verificar autenticidad: {verification_url_html}</span>
+        </div>
+        <div class="strip-badge">receta<br>electrónica</div>
+      </div>
+    </div>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Receta #{receta_id} &mdash; DocYa</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+:root {{
+  --teal: #14b8a6;
+  --teal-dark: #0d9488;
+  --ink: #111827;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --sheet-w: 297mm;
+  --sheet-h: 210mm;
+  --print-w: 283mm;
+  --print-h: 196mm;
+  --half-w: 141.5mm;
+  --half-h: 190mm;
+}}
+body {{
+  font-family: Arial, Helvetica, sans-serif;
+  color: var(--ink);
+  background: #e2e8f0;
+  -webkit-font-smoothing: antialiased;
+}}
+.no-print {{ position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; background: #111827; }}
+.no-print button {{ border: none; border-radius: 999px; padding: 8px 18px; background: var(--teal); color: #fff; font-size: 13px; font-weight: 700; cursor: pointer; }}
+.no-print a {{ color: var(--teal); text-decoration: none; font-size: 13px; }}
+.page-label {{ margin-left: auto; color: #94a3b8; font-size: 12px; }}
+.page {{ width: min(100%, var(--sheet-w)); min-height: var(--sheet-h); margin: 14px auto; background: #fff; border-top: 3px solid var(--teal); box-shadow: 0 4px 28px rgba(0,0,0,0.15); }}
+.sheet {{ width: var(--print-w); min-height: var(--print-h); margin: 0 auto; display: grid; grid-template-columns: var(--half-w) 1px var(--half-w); align-items: start; padding-top: 3mm; }}
+.divider {{ width: 1px; height: var(--half-h); background: repeating-linear-gradient(to bottom, #6b7280 0, #6b7280 2px, transparent 2px, transparent 4px); }}
+.copy {{ height: var(--half-h); padding: 7px 10px 6px; overflow: hidden; position: relative; }}
+.watermark {{ position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 900; letter-spacing: 4px; color: rgba(0,0,0,0.05); transform: rotate(-30deg); pointer-events: none; }}
+.top-strip {{ display: grid; grid-template-columns: 1fr 92px; gap: 8px; align-items: start; padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid var(--line); }}
+.top-center {{ text-align: left; }}
+.logo {{ display: block; height: 21px; margin: 0 0 2px; }}
+.copy-badge {{ display: inline-block; padding: 2px 7px; border-radius: 999px; background: linear-gradient(135deg, #0ae6c7, var(--teal-dark)); color: #fff; font-size: 6.5px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }}
+.top-info {{ text-align: right; font-size: 8px; line-height: 1.35; color: #374151; }}
+.fecha-teal {{ color: var(--teal-dark); font-weight: 700; }}
+.pac-grid {{ display: flex; flex-wrap: wrap; margin-bottom: 5px; overflow: hidden; border: 1.5px solid var(--teal-dark); border-radius: 3px; }}
+.pf {{ flex: 1 1 50%; min-width: 0; padding: 2px 5px; border-right: 1px solid #ccfbf1; border-bottom: 1px solid #ccfbf1; }}
+.pf-name {{ flex: 1 1 100%; background: #f0fdfa; }}
+.pf label {{ display: block; margin-bottom: 1px; color: var(--muted); font-size: 6.5px; letter-spacing: 0.3px; text-transform: uppercase; }}
+.pf strong {{ font-size: 8.5px; }}
+.content-box {{ display: grid; grid-template-columns: 1fr 1px 1fr; margin-bottom: 4px; border: 1px solid var(--line); border-radius: 3px; overflow: hidden; }}
+.col {{ min-height: 96mm; padding: 4px 5px; }}
+.col:last-child {{ background: #fafafa; }}
+.inner-divider {{ width: 1px; background: var(--line); }}
+.sec-title {{ margin-bottom: 4px; padding-bottom: 2px; border-bottom: 1px solid var(--line); color: var(--teal-dark); font-size: 11px; font-weight: 900; }}
+.ind-title {{ color: #374151; font-size: 10px; }}
+.med-rp, .med-com {{ margin: 2px 0; font-size: 8.5px; line-height: 1.35; }}
+.med-num {{ color: var(--teal-dark); font-weight: 700; }}
+.med-det {{ color: #475569; font-size: 7.5px; }}
+.med-cant {{ color: var(--muted); font-size: 7.5px; }}
+.diag-row {{ margin-top: 6px; padding: 2px 6px; border-left: 2px solid var(--teal-dark); background: #f0fdfa; color: #374151; font-size: 7.5px; }}
+.sig-footer {{ display: grid; grid-template-columns: 1fr 92px; gap: 6px; align-items: end; margin-bottom: 4px; padding-top: 4px; border-top: 1px dashed #9ca3af; }}
+.sig-legal, .firma-sub, .strip-note {{ font-size: 6.5px; }}
+.sig-legal {{ color: var(--muted); line-height: 1.45; }}
+.sig-date, .firma-label, .firma-stamp, .strip-info {{ font-size: 7px; }}
+.sig-date {{ margin-top: 4px; font-weight: 700; }}
+.sig-right {{ text-align: center; }}
+.firma-img {{ display: block; width: auto; max-width: 84px; max-height: 32px; margin: 0 auto 2px; object-fit: contain; }}
+.firma-linea {{ width: 80px; height: 28px; margin: 0 auto 2px; border-bottom: 1.5px solid #111; }}
+.firma-label {{ font-weight: 700; }}
+.firma-sub {{ color: #555; }}
+.firma-stamp {{ margin-top: 3px; color: var(--teal-dark); font-weight: 800; letter-spacing: 0.5px; }}
+.qr-strip {{ display: grid; grid-template-columns: 48px 1fr auto; gap: 5px; align-items: center; padding: 4px 5px; background: #f8fafc; border: 1px solid var(--line); border-radius: 3px; }}
+.qr-img {{ display: block; width: 48px; height: 48px; border: 1px solid var(--line); border-radius: 2px; }}
+.strip-info {{ line-height: 1.45; color: #374151; }}
+.strip-note {{ display: block; margin-top: 1px; color: var(--muted); word-break: break-word; }}
+.strip-badge {{ padding: 3px 5px; border-radius: 3px; background: linear-gradient(135deg, #0ae6c7, var(--teal-dark)); color: #fff; font-size: 6.5px; font-weight: 800; line-height: 1.35; letter-spacing: 0.4px; text-align: center; text-transform: uppercase; }}
+@media print {{
+  html, body {{ width: var(--sheet-w); height: var(--sheet-h); margin: 0; padding: 0; background: #fff; }}
+  .no-print {{ display: none !important; }}
+  .page {{ width: var(--sheet-w); min-height: var(--sheet-h); margin: 0; border-top: 0; box-shadow: none; page-break-after: always; break-after: page; }}
+  .page:last-child {{ page-break-after: auto; break-after: auto; }}
+  .sheet, .copy, .content-box, .sig-footer, .qr-strip {{ break-inside: avoid; page-break-inside: avoid; }}
+  @page {{ size: A4 landscape; margin: 7mm; }}
+}}
+@media screen and (max-width: 700px) {{
+  .no-print {{ position: static; gap: 8px; padding: 10px 12px; }}
+  .page-label {{ width: 100%; margin-left: 0; }}
+  .page {{ width: auto; min-height: unset; margin: 8px; border-top-width: 2px; border-radius: 6px; }}
+  .sheet {{ width: 100%; min-height: unset; padding: 8px; grid-template-columns: 1fr; row-gap: 10px; }}
+  .divider {{ width: 100%; height: 1px; background: repeating-linear-gradient(to right, #6b7280 0, #6b7280 2px, transparent 2px, transparent 4px); }}
+  .copy {{ height: auto; min-height: unset; padding: 10px; }}
+  .top-strip {{ grid-template-columns: 1fr; }}
+  .top-center, .top-info {{ text-align: left; }}
+  .pf {{ flex: 1 1 100%; }}
+  .content-box {{ grid-template-columns: 1fr; }}
+  .inner-divider {{ width: 100%; height: 1px; }}
+  .col {{ min-height: unset; }}
+  .sig-footer {{ grid-template-columns: 1fr; }}
+  .sig-right {{ text-align: left; }}
+  .firma-img, .firma-linea {{ margin-left: 0; }}
+  .qr-strip {{ grid-template-columns: 56px 1fr; }}
+  .qr-img {{ width: 56px; height: 56px; }}
+  .strip-badge {{ grid-column: 1 / -1; justify-self: end; }}
+}}
+</style>
+</head>
+<body>
+<div class="no-print">
+  <button onclick="window.print()">Imprimir / PDF</button>
+  <a href="{verification_url_html}" target="_blank">Verificar</a>
+  <span class="page-label">Receta #{receta_id}</span>
+</div>
+<div class="page">
+  <div class="sheet">
+    {_copy("Original")}
+    <div class="divider"></div>
+    {_copy("Duplicado", "DUPLICADO")}
+  </div>
+</div>
+</body>
+</html>"""
 
 # --- POST: crear receta ---
 @app.post("/consultas/{consulta_id}/receta")
 def crear_receta(consulta_id: int, data: RecetaIn, db=Depends(get_db)):
+    _ensure_consulta_receta_schema(db)
     cur = db.cursor()
     cur.execute("""
-        INSERT INTO recetas (consulta_id, medico_id, paciente_uuid, obra_social, nro_credencial, diagnostico)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO recetas (consulta_id, medico_id, paciente_uuid, obra_social, plan, nro_credencial, diagnostico)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     """, (
         consulta_id,
         data.medico_id,
         data.paciente_uuid,
         data.obra_social,
+        data.plan,
         data.nro_credencial,
         data.diagnostico
     ))
@@ -3865,9 +4734,26 @@ def crear_receta(consulta_id: int, data: RecetaIn, db=Depends(get_db)):
 
     for m in data.medicamentos:
         cur.execute("""
-            INSERT INTO receta_items (receta_id, nombre, dosis, frecuencia, duracion)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (receta_id, m["nombre"], m["dosis"], m["frecuencia"], m["duracion"]))
+            INSERT INTO receta_items (
+                receta_id, nombre, dosis, frecuencia, duracion,
+                ifa, nombre_comercial, forma_farmaceutica, concentracion,
+                presentacion, cantidad, indicaciones
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            receta_id,
+            m.get("nombre"),
+            m.get("dosis"),
+            m.get("frecuencia"),
+            m.get("duracion"),
+            m.get("ifa") or m.get("principio_activo") or m.get("principio_activo_str"),
+            m.get("nombre_comercial"),
+            m.get("forma_farmaceutica") or m.get("forma"),
+            m.get("concentracion"),
+            m.get("presentacion"),
+            m.get("cantidad") or 1,
+            m.get("indicaciones"),
+        ))
 
     db.commit()
     return {"ok": True, "receta_id": receta_id}
@@ -3878,6 +4764,52 @@ from fastapi.responses import HTMLResponse
 
 @app.get("/consultas/{consulta_id}/receta", response_class=HTMLResponse)
 def ver_receta_consulta(consulta_id: int, db=Depends(get_db)):
+    _ensure_consulta_receta_schema(db)
+    cur = db.cursor()
+    cur.execute("""
+        SELECT r.id, r.obra_social, r.plan, r.nro_credencial, r.diagnostico, r.creado_en,
+               m.full_name AS medico_nombre, m.especialidad, m.matricula, m.firma_url,
+               u.full_name AS paciente_nombre, u.dni
+        FROM recetas r
+        JOIN consultas c ON c.id = r.consulta_id
+        JOIN medicos m ON m.id = c.medico_id
+        JOIN users u ON u.id = r.paciente_uuid
+        WHERE r.consulta_id = %s
+        ORDER BY r.creado_en DESC
+        LIMIT 1
+    """, (consulta_id,))
+    receta = cur.fetchone()
+    if not receta:
+        raise HTTPException(status_code=404, detail="No existe receta para esta consulta")
+
+    receta_id = receta[0]
+    cur.execute("""
+        SELECT ifa, nombre_comercial, forma_farmaceutica, concentracion,
+               presentacion, cantidad, indicaciones, nombre
+        FROM receta_items
+        WHERE receta_id = %s
+    """, (receta_id,))
+    medicamentos = cur.fetchall()
+
+    verification_url = f"https://docya-railway-production.up.railway.app/ver_receta/{receta_id}"
+    html = _build_consulta_receta_html(
+        receta_id=receta_id,
+        medico_nombre=receta[6],
+        especialidad=receta[7],
+        matricula=receta[8],
+        firma_url=receta[9],
+        paciente_nombre=receta[10],
+        paciente_dni=receta[11],
+        obra_social=receta[1],
+        plan=receta[2],
+        nro_credencial=receta[3],
+        diagnostico=receta[4],
+        creado_en=receta[5],
+        medicamentos=medicamentos,
+        verification_url=verification_url,
+    )
+    return HTMLResponse(html)
+
     """
     Muestra la receta de una consulta (última generada) en formato HTML DocYa, incluyendo la firma digital real del médico.
     """
@@ -4182,6 +5114,15 @@ def actualizar_ubicacion_medico(consulta_id: int, datos: dict, db=Depends(get_db
         # 5) CALCULAR ETA LOCAL
         # -----------------------------------------
         tiempo_min = calcular_eta_local(distancia_km)
+        eta_google = calcular_eta_google_rutas(
+            consulta_id,
+            lat_med,
+            lng_med,
+            lat_pac,
+            lng_pac,
+        )
+        if eta_google is not None:
+            tiempo_min = eta_google
 
         print(
             f"🧮 ETA local consulta {consulta_id}: "
@@ -4705,6 +5646,62 @@ import tempfile
 
 @app.post("/consultas/{consulta_id}/receta_pdf_html")
 def generar_receta_pdf_html(consulta_id: int, db=Depends(get_db)):
+    _ensure_consulta_receta_schema(db)
+    cur = db.cursor()
+    cur.execute("""
+        SELECT r.id, r.obra_social, r.plan, r.nro_credencial, r.diagnostico, r.creado_en,
+               m.full_name AS medico_nombre, m.matricula, m.especialidad, m.firma_url,
+               u.full_name AS paciente_nombre, u.dni
+        FROM recetas r
+        JOIN consultas c ON c.id = r.consulta_id
+        JOIN medicos m ON r.medico_id = m.id
+        JOIN users u ON r.paciente_uuid = u.id
+        WHERE c.id = %s
+        ORDER BY r.creado_en DESC
+        LIMIT 1
+    """, (consulta_id,))
+    receta = cur.fetchone()
+    if not receta:
+        raise HTTPException(status_code=404, detail="Receta no encontrada")
+
+    receta_id = receta[0]
+    cur.execute("""
+        SELECT ifa, nombre_comercial, forma_farmaceutica, concentracion,
+               presentacion, cantidad, indicaciones, nombre
+        FROM receta_items
+        WHERE receta_id = %s
+    """, (receta_id,))
+    medicamentos = cur.fetchall()
+
+    verification_url = f"https://docya-railway-production.up.railway.app/ver_receta/{receta_id}"
+    html = _build_consulta_receta_html(
+        receta_id=receta_id,
+        medico_nombre=receta[5],
+        especialidad=receta[7],
+        matricula=receta[6],
+        firma_url=receta[8],
+        paciente_nombre=receta[10],
+        paciente_dni=receta[11],
+        obra_social=receta[1],
+        plan=receta[2],
+        nro_credencial=receta[3],
+        diagnostico=receta[4],
+        creado_en=receta[5],
+        medicamentos=medicamentos,
+        verification_url=verification_url,
+    )
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        HTML(string=html).write_pdf(tmp_pdf.name)
+        tmp_pdf.seek(0)
+        pdf_bytes = tmp_pdf.read()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename=receta_{consulta_id}.pdf"},
+    )
+
     cur = db.cursor()
     cur.execute("""
         SELECT r.id, r.consulta_id, r.paciente_uuid, r.medico_id,
@@ -4931,9 +5928,11 @@ async def hay_profesional(
         WHERE disponible = TRUE
           AND tipo = %s
           AND activo = TRUE
+          AND ultimo_ping IS NOT NULL
+          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
-    """, (tipo,))
+    """, (tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS))
 
     count = cur.fetchone()[0]
 
@@ -5014,10 +6013,15 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
         )) AS distancia
         FROM medicos
         WHERE disponible = TRUE
+        AND activo = TRUE
         AND tipo = %s
+        AND ultimo_ping IS NOT NULL
+        AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+        AND latitud IS NOT NULL
+        AND longitud IS NOT NULL
         ORDER BY distancia ASC
         LIMIT 1
-    """, (lat, lng, lat, tipo))
+    """, (lat, lng, lat, tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS))
 
     row = cur.fetchone()
 
@@ -5042,14 +6046,27 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
             lng,
             estado,
             metodo_pago,
-            tipo
+            tipo,
+            asignada_en,
+            expira_en
         )
-        VALUES (%s,%s,'Pago aprobado','Dirección desde MP',%s,%s,'pendiente','tarjeta',%s)
+        VALUES (
+            %s,%s,'Pago aprobado','Dirección desde MP',%s,%s,
+            'pendiente','tarjeta',%s,
+            NOW(), NOW() + INTERVAL '30 seconds'
+        )
         RETURNING id, creado_en
     """, (paciente_uuid, medico_id, lat, lng, tipo))
     
     consulta_id, creado_en = cur.fetchone()
     db.commit()
+
+    cur.execute(
+        "SELECT expira_en FROM consultas WHERE id = %s",
+        (consulta_id,),
+    )
+    row_expira = cur.fetchone()
+    expira_en = row_expira[0] if row_expira else None
 
     # --------------------------------------------------------
     # 🔔 WebSocket — enviar solo si coincide el tipo
@@ -5063,7 +6080,8 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
                     "tipo": "consulta_nueva",
                     "consulta_id": consulta_id,
                     "paciente_uuid": paciente_uuid,
-                    "profesional_tipo": tipo
+                    "profesional_tipo": tipo,
+                    "expira_en": str(expira_en) if expira_en else None,
                 })
                 print(f"📤 WS enviado al {tipo} {medico_id}")
         except Exception as e:
@@ -5081,8 +6099,11 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
             "📢 Nueva consulta",
             "Tienes una nueva solicitud",
             {
+                "tipo": "consulta_nueva",
                 "consulta_id": consulta_id,
-                "profesional_tipo": tipo
+                "medico_id": str(medico_id),
+                "profesional_tipo": tipo,
+                "expira_en": str(expira_en) if expira_en else "",
             }
         )
 
@@ -5095,6 +6116,7 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
 # ---------- CONSULTAS DETALLE ----------
 @app.get("/consultas/{consulta_id}")
 def obtener_consulta(consulta_id: int, db=Depends(get_db)):
+    _ensure_teleconsulta_columns(db)
     cur = db.cursor()
     cur.execute("""
         SELECT 
@@ -5110,7 +6132,10 @@ def obtener_consulta(consulta_id: int, db=Depends(get_db)):
             c.mp_status,
             m.full_name, 
             m.matricula,
+            m.foto_perfil,
             m.tipo,
+            COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+            c.video_url,
             c.tiempo_estimado_min,
             c.medico_lat,
             c.medico_lng,
@@ -5131,7 +6156,7 @@ def obtener_consulta(consulta_id: int, db=Depends(get_db)):
         cid, paciente_uuid, medico_id, estado,
         motivo, direccion, lat, lng, creado_en,
         mp_status,
-        medico_nombre, medico_matricula, tipo,
+        medico_nombre, medico_matricula, medico_foto_perfil, tipo, canal_atencion, video_url,
         tiempo_estimado_raw,
         medico_lat, medico_lng,
         paciente_nombre, paciente_telefono      # 🔥 NUEVO
@@ -5180,7 +6205,10 @@ def obtener_consulta(consulta_id: int, db=Depends(get_db)):
         "mp_status": mp_status,
         "medico_nombre": medico_nombre,
         "medico_matricula": medico_matricula,
+        "medico_foto_perfil": medico_foto_perfil,
         "tipo": tipo,
+        "canal_atencion": canal_atencion,
+        "video_url": video_url,
         "tiempo_estimado_min": tiempo_estimado_min,
         "distancia_km": round(distancia_km, 2),   # ✔ YA USADO POR PACIENTE
         "medico_lat": medico_lat,
@@ -5198,6 +6226,7 @@ def obtener_consulta(consulta_id: int, db=Depends(get_db)):
 # -----------------------------------------------------------------------
 @app.get("/pacientes/{paciente_uuid}/consulta_activa")
 def consulta_activa_paciente(paciente_uuid: str, db=Depends(get_db)):
+    _ensure_teleconsulta_columns(db)
     cur = db.cursor()
     cur.execute("""
         SELECT
@@ -5213,11 +6242,13 @@ def consulta_activa_paciente(paciente_uuid: str, db=Depends(get_db)):
             m.matricula  AS medico_matricula,
             m.latitud    AS medico_lat,
             m.longitud   AS medico_lng,
+            COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+            c.video_url,
             c.tiempo_estimado_min
         FROM consultas c
         LEFT JOIN medicos m ON m.id = c.medico_id
         WHERE c.paciente_uuid = %s
-          AND c.estado IN ('pendiente', 'aceptada', 'en_camino', 'en_domicilio', 'en_curso')
+          AND c.estado IN ('pendiente', 'aceptada', 'en_camino', 'en_domicilio')
         ORDER BY c.creado_en DESC
         LIMIT 1
     """, (paciente_uuid,))
@@ -5227,7 +6258,7 @@ def consulta_activa_paciente(paciente_uuid: str, db=Depends(get_db)):
 
     (cid, estado, motivo, direccion, lat, lng, tipo, medico_id,
      medico_nombre, medico_matricula, medico_lat, medico_lng,
-     tiempo_estimado_raw) = row
+     canal_atencion, video_url, tiempo_estimado_raw) = row
 
     try:
         tiempo_estimado_min = int(round(float(tiempo_estimado_raw))) if tiempo_estimado_raw else 0
@@ -5248,6 +6279,8 @@ def consulta_activa_paciente(paciente_uuid: str, db=Depends(get_db)):
         "medico_matricula": medico_matricula,
         "medico_lat": medico_lat,
         "medico_lng": medico_lng,
+        "canal_atencion": canal_atencion,
+        "video_url": video_url,
         "tiempo_estimado_min": tiempo_estimado_min,
     }
 
@@ -5350,6 +6383,21 @@ from fastapi import HTTPException
 class UbicacionIn(BaseModel):
     lat: float
     lng: float
+
+
+def _sql_disponible_si_no_esta_en_consulta() -> str:
+    return """
+        CASE
+            WHEN EXISTS (
+                SELECT 1
+                FROM consultas
+                WHERE medico_id = %s
+                  AND estado IN ('aceptada', 'en_camino', 'en_domicilio')
+            )
+            THEN disponible
+            ELSE TRUE
+        END
+    """
 
 
 # ==========================================
@@ -5487,6 +6535,113 @@ def calcular_eta_local(distancia_km):
     return round((distancia_km / velocidad_kmh) * 60)
 
 
+def _calcular_eta_urbana_v2(distancia_km, ahora):
+    if distancia_km <= 0.15:
+        return 1
+
+    if time(7, 30) <= ahora <= time(20, 30):
+        velocidad_auto_kmh = 13
+    else:
+        velocidad_auto_kmh = 20
+
+    minutos_auto = (distancia_km / velocidad_auto_kmh) * 60
+    minutos_urbanos = (distancia_km / 6) * 60
+    eta = (minutos_auto * 0.7) + (minutos_urbanos * 0.3)
+
+    if distancia_km > 0.5:
+        eta += 1
+    if distancia_km > 2.0:
+        eta += 1
+
+    return max(1, round(eta))
+
+
+def calcular_eta_local(distancia_km):
+    ahora = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires")).time()
+    return _calcular_eta_urbana_v2(distancia_km, ahora)
+
+
+def _parse_duration_seconds(duration_value):
+    if duration_value is None:
+        return None
+
+    raw = str(duration_value).strip()
+    if not raw.endswith("s"):
+        return None
+
+    try:
+        return float(raw[:-1])
+    except Exception:
+        return None
+
+
+def calcular_eta_google_rutas(consulta_id, lat_med, lng_med, lat_pac, lng_pac):
+    if not GOOGLE_ROUTES_API_KEY:
+        return None
+
+    now_ts = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
+    cache = _eta_google_cache.get(consulta_id)
+    if cache:
+        age_seconds = (now_ts - cache["timestamp"]).total_seconds()
+        if age_seconds < GOOGLE_ROUTES_THROTTLE_SECONDS:
+            return cache["eta"]
+
+    try:
+        response = requests.post(
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": GOOGLE_ROUTES_API_KEY,
+                "X-Goog-FieldMask": "routes.duration,routes.distanceMeters",
+            },
+            json={
+                "origin": {
+                    "location": {
+                        "latLng": {"latitude": lat_med, "longitude": lng_med}
+                    }
+                },
+                "destination": {
+                    "location": {
+                        "latLng": {"latitude": lat_pac, "longitude": lng_pac}
+                    }
+                },
+                "travelMode": "DRIVE",
+                "routingPreference": "TRAFFIC_AWARE",
+                "languageCode": "es-AR",
+                "units": "METRIC",
+            },
+            timeout=5,
+        )
+
+        if response.status_code != 200:
+            print(
+                f"⚠️ Google Routes consulta {consulta_id}: "
+                f"{response.status_code} {response.text[:180]}"
+            )
+            return None
+
+        payload = response.json() or {}
+        routes = payload.get("routes") or []
+        if not routes:
+            return None
+
+        duration_seconds = _parse_duration_seconds(routes[0].get("duration"))
+        if duration_seconds is None:
+            return None
+
+        eta_min = max(1, round(duration_seconds / 60))
+        _eta_google_cache[consulta_id] = {
+            "eta": eta_min,
+            "timestamp": now_ts,
+        }
+
+        return eta_min
+
+    except Exception as e:
+        print(f"⚠️ Error Google Routes consulta {consulta_id}: {e}")
+        return None
+
+
 
 # --------------------------------------
 # 🟦 NUEVO ENDPOINT SIN ORS (LISTO)
@@ -5507,10 +6662,12 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
             SET latitud = %s,
                 longitud = %s,
                 updated_at = %s,
-                ultimo_ping = %s
+                ultimo_ping = NOW(),
+                activo = TRUE,
+                disponible = """ + _sql_disponible_si_no_esta_en_consulta() + """
             WHERE id = %s
             RETURNING disponible;
-        """, (lat_med, lng_med, ahora_arg, ahora_arg, medico_id))
+        """, (lat_med, lng_med, ahora_arg, medico_id, medico_id))
 
         row = cur.fetchone()
         if not row:
@@ -5574,6 +6731,16 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
             if lat_pac is not None and lng_pac is not None:
                 distancia_km = calcular_distancia_km(lat_med, lng_med, float(lat_pac), float(lng_pac))
                 tiempo_min = calcular_eta_local(distancia_km)
+                if estado in ("aceptada", "en_camino"):
+                    eta_google = calcular_eta_google_rutas(
+                        consulta_id,
+                        lat_med,
+                        lng_med,
+                        float(lat_pac),
+                        float(lng_pac),
+                    )
+                    if eta_google is not None:
+                        tiempo_min = eta_google
 
                 print(f"🧮 Distancia: {distancia_km:.2f} km → ETA: {tiempo_min} min")
 
@@ -6287,6 +7454,49 @@ from psycopg2.extras import RealDictCursor
 
 @app.get("/ver_receta/{receta_id}", response_class=HTMLResponse)
 def ver_receta(receta_id: int, db=Depends(get_db)):
+    _ensure_consulta_receta_schema(db)
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT r.id, r.obra_social, r.plan, r.nro_credencial, r.diagnostico, r.creado_en,
+               m.full_name AS medico_nombre, m.especialidad, m.matricula, m.firma_url,
+               u.full_name AS paciente_nombre, u.dni
+        FROM recetas r
+        JOIN consultas c ON c.id = r.consulta_id
+        JOIN medicos m ON m.id = c.medico_id
+        JOIN users u ON u.id = r.paciente_uuid
+        WHERE r.id = %s
+    """, (receta_id,))
+    receta = cur.fetchone()
+    if not receta:
+        return HTMLResponse("<h2>Receta no encontrada</h2>", status_code=404)
+
+    cur.execute("""
+        SELECT ifa, nombre_comercial, forma_farmaceutica, concentracion,
+               presentacion, cantidad, indicaciones, nombre
+        FROM receta_items
+        WHERE receta_id = %s
+    """, (receta_id,))
+    medicamentos = cur.fetchall()
+
+    verification_url = f"https://docya-railway-production.up.railway.app/ver_receta/{receta_id}"
+    html = _build_consulta_receta_html(
+        receta_id=receta_id,
+        medico_nombre=receta["medico_nombre"],
+        especialidad=receta["especialidad"],
+        matricula=receta["matricula"],
+        firma_url=receta["firma_url"],
+        paciente_nombre=receta["paciente_nombre"],
+        paciente_dni=receta["dni"],
+        obra_social=receta["obra_social"],
+        plan=receta["plan"],
+        nro_credencial=receta["nro_credencial"],
+        diagnostico=receta["diagnostico"],
+        creado_en=receta["creado_en"],
+        medicamentos=medicamentos,
+        verification_url=verification_url,
+    )
+    return HTMLResponse(html)
+
     cur = db.cursor(cursor_factory=RealDictCursor)
 
     # Traer datos principales
@@ -7330,9 +8540,22 @@ def delete_medico(medico_id: int, db=Depends(get_db)):
     """, (medico_id,))
 
     # 3) Eliminar tokens push del médico
-    cur.execute("DELETE FROM fcm_tokens WHERE medico_id = %s", (medico_id,))
+    cur.execute("SELECT to_regclass('public.fcm_tokens')")
+    if cur.fetchone()[0]:
+        cur.execute("DELETE FROM fcm_tokens WHERE medico_id = %s", (medico_id,))
 
-    # 4) Eliminar la cuenta del médico
+    # 4) Eliminar datos del recetario del médico
+    cur.execute("SELECT to_regclass('public.recetario_recetas')")
+    if cur.fetchone()[0]:
+        cur.execute("DELETE FROM recetario_recetas WHERE medico_id = %s", (medico_id,))
+    cur.execute("SELECT to_regclass('public.recetario_certificados')")
+    if cur.fetchone()[0]:
+        cur.execute("DELETE FROM recetario_certificados WHERE medico_id = %s", (medico_id,))
+    cur.execute("SELECT to_regclass('public.recetario_pacientes')")
+    if cur.fetchone()[0]:
+        cur.execute("DELETE FROM recetario_pacientes WHERE medico_id = %s", (medico_id,))
+
+    # 5) Eliminar la cuenta del médico
     cur.execute("DELETE FROM medicos WHERE id = %s", (medico_id,))
 
     db.commit()
@@ -7345,14 +8568,14 @@ def delete_medico(medico_id: int, db=Depends(get_db)):
 @app.post("/medico/{medico_id}/ping")
 def ping_medico(medico_id: int, db=Depends(get_db)):
     try:
-        ahora = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
-
         cur = db.cursor()
         cur.execute("""
             UPDATE medicos
-            SET ultimo_ping = %s
+            SET ultimo_ping = NOW(),
+                activo = TRUE,
+                disponible = """ + _sql_disponible_si_no_esta_en_consulta() + """
             WHERE id = %s
-        """, (ahora, medico_id))
+        """, (medico_id, medico_id))
 
         db.commit()
         cur.close()
@@ -7393,13 +8616,17 @@ def medicos_mapa(db=Depends(get_db)):
             latitud,
             longitud,
             telefono,
-            matricula
+            matricula,
+            ultimo_ping
         FROM medicos
         WHERE activo = TRUE
+          AND disponible = TRUE
+          AND ultimo_ping IS NOT NULL
+          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
         ORDER BY full_name;
-    """)
+    """, (PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,))
 
     rows = cur.fetchall()
 
@@ -7414,6 +8641,7 @@ def medicos_mapa(db=Depends(get_db)):
             "longitud": float(r[6]),
             "telefono": r[7],
             "matricula": r[8],
+            "ultimo_ping": r[9].isoformat() if r[9] else None,
         }
         for r in rows
     ]

@@ -11,6 +11,7 @@ Agrupa:
 
 import os
 import re
+from urllib.parse import urlencode
 from datetime import date, datetime, time, timedelta, timezone
 
 import cloudinary
@@ -53,6 +54,8 @@ ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "120"))
 DEFAULT_GOOGLE_CLIENT_IDS = [
     "117956759164-9q555tbkl8ulrmcapgj4emoqn827ltti.apps.googleusercontent.com",
+    "117956759164-mqep8e78d7fraoki2uqvcf4ja8m7ct5t.apps.googleusercontent.com",
+    "117956759164-4eeokd1a5evfb6562j2q9j70bsls4ml0.apps.googleusercontent.com",
     "327572770521-tom99oocat1tcp9pahlejsar4iu62lhg.apps.googleusercontent.com",
 ]
 GOOGLE_CLIENT_IDS = list(
@@ -70,6 +73,32 @@ GOOGLE_CLIENT_IDS = list(
 E164_REGEX = r"^\+[1-9]\d{7,14}$"
 TIPOS_DOCUMENTO = {"dni", "pasaporte", "otro"}
 SEXOS_VALIDOS = {"masculino", "femenino", "otro"}
+
+
+def _verify_google_token_payload(raw_id_token: str):
+    request_adapter = google_requests.Request()
+    payload = None
+    last_error = None
+    audiences = GOOGLE_CLIENT_IDS or [None]
+
+    for audience in audiences:
+        try:
+            payload = google_id_token.verify_oauth2_token(
+                raw_id_token, request_adapter, audience
+            )
+            print(
+                f"✅ Google token verificado con audience={audience} "
+                f"aud={payload.get('aud')} azp={payload.get('azp')}"
+            )
+            return payload
+        except Exception as exc:
+            last_error = exc
+
+    print(
+        f"⚠️ Google token inválido. audiences_intentadas={audiences} "
+        f"ultimo_error={last_error}"
+    )
+    raise HTTPException(status_code=401, detail=f"Token Google inválido: {last_error}")
 
 
 def _ensure_user_profile_columns(db):
@@ -124,6 +153,16 @@ def _normalize_bool(value) -> bool:
     return bool(value) is True
 
 
+def _patient_register_url(ref: str | None = None) -> str:
+    base_url = os.getenv(
+        "PATIENT_REGISTER_URL",
+        "https://www.docya.com.ar/registro/paciente",
+    ).rstrip("/")
+    if not ref:
+        return base_url
+    return f"{base_url}?{urlencode({'ref': ref})}"
+
+
 class RegisterIn(BaseModel):
     email: EmailStr
     password: str
@@ -136,6 +175,7 @@ class RegisterIn(BaseModel):
     fecha_nacimiento: date | None = None
     sexo: str | None = None
     acepto_condiciones: bool = False
+    codigo_referido: str | None = None
 
 
 class LoginIn(BaseModel):
@@ -145,6 +185,7 @@ class LoginIn(BaseModel):
 
 class GoogleAuthIn(BaseModel):
     id_token: str
+    codigo_referido: str | None = None
 
 
 class UserOut(BaseModel):
@@ -292,6 +333,105 @@ def enviar_email_validacion_paciente(email: str, user_id: str, full_name: str):
         print(f"Error enviando email validación paciente: {exc}")
 
 
+def enviar_email_google_paciente(email: str, user_id: str, full_name: str):
+    token = create_access_token(
+        {"sub": str(user_id), "email": email, "tipo": "validacion_paciente"},
+        expires_minutes=60 * 24,
+    )
+    link_activacion = f"https://docya-railway-production.up.railway.app/auth/activar_paciente?token={token}"
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="es">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Tu cuenta DocYa ya casi esta lista</title>
+      </head>
+      <body style="margin:0; padding:0; background:#eef6f7; font-family:Arial, sans-serif; color:#0f172a;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:32px 16px; background:#eef6f7;">
+          <tr>
+            <td align="center">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px; background:#ffffff; border-radius:24px; overflow:hidden; box-shadow:0 18px 50px rgba(15,23,42,0.12);">
+                <tr>
+                  <td style="padding:0; background:linear-gradient(135deg,#062426 0%,#0aa7a6 100%);">
+                    <div style="padding:36px 32px 28px; text-align:left;">
+                      <img src="https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/logoblanco_1_qdlnog.png" alt="DocYa" style="width:148px; max-width:100%; display:block;">
+                      <p style="margin:28px 0 10px; color:#99f6e4; font-size:13px; letter-spacing:0.08em; text-transform:uppercase; font-weight:700;">
+                        Registro con Google
+                      </p>
+                      <h1 style="margin:0; color:#ffffff; font-size:32px; line-height:1.15; font-weight:800;">
+                        {full_name}, tu cuenta ya casi esta lista
+                      </h1>
+                      <p style="margin:14px 0 0; color:rgba(255,255,255,0.84); font-size:16px; line-height:1.6;">
+                        Terminaste tu registro con Google. Ahora confirma tu correo para dejar activa tu cuenta y empezar a disfrutar la experiencia DocYa.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:32px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:18px; margin-bottom:24px;">
+                      <tr>
+                        <td style="padding:22px 24px;">
+                          <p style="margin:0 0 8px; font-size:16px; font-weight:700; color:#0f172a;">
+                            Confirma tu cuenta
+                          </p>
+                          <p style="margin:0; font-size:14px; line-height:1.7; color:#475569;">
+                            Este paso te deja la cuenta lista para entrar desde la web o la app. El enlace es seguro y estara disponible por 24 horas.
+                          </p>
+                        </td>
+                      </tr>
+                    </table>
+                    <div style="text-align:center; margin:0 0 28px;">
+                      <a href="{link_activacion}" target="_blank" style="display:inline-block; background:#0aa7a6; color:#ffffff; text-decoration:none; padding:16px 32px; border-radius:999px; font-size:16px; font-weight:700;">
+                        Confirmar mi cuenta
+                      </a>
+                    </div>
+                    <p style="margin:0 0 10px; font-size:13px; color:#64748b; line-height:1.7; text-align:center;">
+                      Si el boton no funciona, copia y pega este enlace en tu navegador:
+                    </p>
+                    <p style="margin:0; font-size:13px; line-height:1.7; text-align:center; word-break:break-all;">
+                      <a href="{link_activacion}" target="_blank" style="color:#0aa7a6; text-decoration:none;">
+                        {link_activacion}
+                      </a>
+                    </p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:0 32px 32px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ecfeff; border:1px solid #a5f3fc; border-radius:18px;">
+                      <tr>
+                        <td style="padding:18px 20px;">
+                          <p style="margin:0 0 6px; font-size:14px; font-weight:700; color:#155e75;">
+                            Tip DocYa
+                          </p>
+                          <p style="margin:0; font-size:13px; line-height:1.7; color:#155e75;">
+                            Cuando confirmes tu correo vas a poder seguir tu registro y entrar con la misma cuenta Google con la que te acabas de registrar.
+                          </p>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+    email_data = SendSmtpEmail(
+        to=[{"email": email, "name": full_name}],
+        sender={"email": "nahundeveloper@gmail.com", "name": "DocYa"},
+        subject="Confirma tu cuenta de DocYa",
+        html_content=html_content,
+    )
+    try:
+        _brevo_client().send_transac_email(email_data)
+    except ApiException as exc:
+        print(f"Error enviando email Google paciente: {exc}")
+
+
 def enviar_email_validacion(email: str, medico_id: int, full_name: str):
     token = create_access_token(
         {"sub": str(medico_id), "email": email, "tipo": "validacion"},
@@ -385,7 +525,7 @@ def register(request: Request, data: RegisterIn, db=Depends(get_db)):
     full_name = data.full_name.strip().title()
 
     try:
-        ref_code = request.cookies.get("ref_code")
+        ref_code = (data.codigo_referido or request.cookies.get("ref_code") or "").strip() or None
         cur.execute(
             """
             INSERT INTO users (
@@ -438,14 +578,14 @@ def register(request: Request, data: RegisterIn, db=Depends(get_db)):
 @router.get("/registro/paciente")
 def registro(request: Request):
     """Página pública de registro paciente."""
-    return templates.TemplateResponse("registro.html", {"request": request})
+    return RedirectResponse(url=_patient_register_url())
 
 
 @router.get("/r")
 def referido(request: Request):
     """Guarda el referido en cookie y redirige al registro."""
     ref = request.query_params.get("ref")
-    response = RedirectResponse(url="/registro/paciente")
+    response = RedirectResponse(url=_patient_register_url(ref))
     if ref:
         response.set_cookie(
             key="ref_code",
@@ -602,18 +742,7 @@ def auth_google(data: GoogleAuthIn, db=Depends(get_db)):
     """Login/registro con Google y creación automática de paciente base."""
     _ensure_user_profile_columns(db)
     try:
-        request_adapter = google_requests.Request()
-        payload = None
-        last_error = None
-        audiences = GOOGLE_CLIENT_IDS or [None]
-        for audience in audiences:
-            try:
-                payload = google_id_token.verify_oauth2_token(data.id_token, request_adapter, audience)
-                break
-            except Exception as exc:
-                last_error = exc
-        if payload is None:
-            raise HTTPException(status_code=401, detail=f"Token Google inválido: {last_error}")
+        payload = _verify_google_token_payload(data.id_token)
 
         google_sub = payload.get("sub")
         email = (payload.get("email") or "").lower().strip()
@@ -637,6 +766,10 @@ def auth_google(data: GoogleAuthIn, db=Depends(get_db)):
         )
         user = cur.fetchone()
 
+        codigo_referido = (data.codigo_referido or "").strip() or None
+
+        created_new_user = False
+
         if user:
             cur.execute(
                 """
@@ -645,27 +778,31 @@ def auth_google(data: GoogleAuthIn, db=Depends(get_db)):
                     email = %s,
                     full_name = COALESCE(NULLIF(full_name, ''), %s),
                     foto_url = COALESCE(NULLIF(foto_url, ''), %s),
-                    validado = TRUE
+                    codigo_referido = COALESCE(NULLIF(codigo_referido, ''), %s)
                 WHERE id = %s
                 RETURNING id, full_name, email, role, validado, perfil_completo, foto_url
                 """,
-                (google_sub, email, full_name, google_picture, user["id"]),
+                (google_sub, email, full_name, google_picture, codigo_referido, user["id"]),
             )
             user = cur.fetchone()
         else:
             cur.execute(
                 """
                 INSERT INTO users (
-                    email, full_name, google_id, foto_url, validado, role, acepta_terminos, perfil_completo
+                    email, full_name, google_id, foto_url, validado, role, acepta_terminos, perfil_completo, codigo_referido
                 )
-                VALUES (%s, %s, %s, %s, TRUE, 'patient', FALSE, FALSE)
+                VALUES (%s, %s, %s, %s, FALSE, 'patient', FALSE, FALSE, %s)
                 RETURNING id, full_name, email, role, validado, perfil_completo, foto_url
                 """,
-                (email, full_name, google_sub, google_picture),
+                (email, full_name, google_sub, google_picture, codigo_referido),
             )
             user = cur.fetchone()
+            created_new_user = True
 
         db.commit()
+
+        if created_new_user:
+            enviar_email_google_paciente(user["email"], str(user["id"]), user["full_name"])
 
         token = create_access_token(
             {"sub": str(user["id"]), "email": user["email"], "role": user["role"]}
@@ -778,23 +915,7 @@ def auth_google_medico(data: GoogleAuthIn, db=Depends(get_db)):
     """Login/registro con Google para profesionales."""
     _ensure_medico_profile_columns(db)
     try:
-        request_adapter = google_requests.Request()
-        payload = None
-        last_error = None
-        audiences = GOOGLE_CLIENT_IDS or [None]
-        for audience in audiences:
-            try:
-                payload = google_id_token.verify_oauth2_token(
-                    data.id_token, request_adapter, audience
-                )
-                break
-            except Exception as exc:
-                last_error = exc
-
-        if payload is None:
-            raise HTTPException(
-                status_code=401, detail=f"Token Google inválido: {last_error}"
-            )
+        payload = _verify_google_token_payload(data.id_token)
 
         google_sub = payload.get("sub")
         email = (payload.get("email") or "").lower().strip()
