@@ -1878,7 +1878,8 @@ async def intentar_reasignar(
         try:
             # 1️⃣ Verificar estado actual de la consulta
             cur.execute("""
-                SELECT lat, lng, tipo, medico_id, estado
+                SELECT lat, lng, tipo, medico_id, estado,
+                       COALESCE(canal_atencion, 'domicilio') AS canal_atencion
                 FROM consultas
                 WHERE id = %s
             """, (consulta_id,))
@@ -1888,7 +1889,7 @@ async def intentar_reasignar(
                 print("❌ Consulta no existe")
                 return False
 
-            lat, lng, tipo, medico_actual, estado_actual = row
+            lat, lng, tipo, medico_actual, estado_actual, canal_atencion = row
 
             # Si el paciente canceló, no tiene sentido seguir
             if estado_actual in ("cancelada", "finalizada"):
@@ -1906,13 +1907,16 @@ async def intentar_reasignar(
                     id,
                     latitud,
                     longitud,
-                    (6371 * acos(
+                    CASE
+                        WHEN %s = 'teleconsulta' THEN 0
+                        ELSE (6371 * acos(
                         cos(radians(%s)) *
                         cos(radians(latitud)) *
                         cos(radians(longitud) - radians(%s)) +
                         sin(radians(%s)) *
                         sin(radians(latitud))
-                    )) AS distancia
+                        ))
+                    END AS distancia
                 FROM medicos
                 WHERE
                     disponible = TRUE
@@ -1920,10 +1924,11 @@ async def intentar_reasignar(
                     AND tipo = %s
                     AND ultimo_ping IS NOT NULL
                     AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
-                    AND latitud IS NOT NULL
-                    AND longitud IS NOT NULL
+                    AND (%s = 'teleconsulta' OR latitud IS NOT NULL)
+                    AND (%s = 'teleconsulta' OR longitud IS NOT NULL)
                     AND (
-                        (6371 * acos(
+                        %s = 'teleconsulta'
+                        OR (6371 * acos(
                             cos(radians(%s)) *
                             cos(radians(latitud)) *
                             cos(radians(longitud) - radians(%s)) +
@@ -1931,7 +1936,16 @@ async def intentar_reasignar(
                             sin(radians(latitud))
                         )) <= 10
                     )
-            """, (lat, lng, lat, tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS, lat, lng, lat))
+            """, (
+                canal_atencion,
+                lat, lng, lat,
+                tipo,
+                PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
+                canal_atencion,
+                canal_atencion,
+                canal_atencion,
+                lat, lng, lat,
+            ))
 
             # 3️⃣ Ordenar por cercanía
             medicos = sorted(cur.fetchall(), key=lambda x: x[3])
@@ -2012,12 +2026,43 @@ async def intentar_reasignar(
 
 async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
     """Encapsula la lógica de WS y Push para no ensuciar el motor"""
-    cur.execute(
-        "SELECT expira_en FROM consultas WHERE id = %s",
-        (consulta_id,),
-    )
-    row_expira = cur.fetchone()
-    expira_en = row_expira[0] if row_expira else None
+    cur.execute("""
+        SELECT
+            c.expira_en,
+            c.paciente_uuid,
+            COALESCE(u.full_name, 'Paciente') AS paciente_nombre,
+            COALESCE(u.telefono, 'Sin numero') AS paciente_telefono,
+            c.motivo,
+            c.direccion,
+            c.lat,
+            c.lng,
+            c.metodo_pago,
+            m.tipo,
+            COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+            c.video_url
+        FROM consultas c
+        JOIN medicos m ON m.id = %s
+        LEFT JOIN users u ON u.id = c.paciente_uuid
+        WHERE c.id = %s
+    """, (medico_id, consulta_id))
+    consulta_row = cur.fetchone()
+    if not consulta_row:
+        return
+
+    (
+        expira_en,
+        paciente_uuid,
+        paciente_nombre,
+        paciente_telefono,
+        motivo,
+        direccion,
+        lat,
+        lng,
+        metodo_pago,
+        tipo,
+        canal_atencion,
+        video_url,
+    ) = consulta_row
 
     # WebSocket
     if medico_id in active_medicos:
@@ -2025,6 +2070,18 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
             await active_medicos[medico_id]["ws"].send_json({
                 "tipo": "consulta_nueva",
                 "consulta_id": consulta_id,
+                "paciente_uuid": str(paciente_uuid),
+                "paciente_nombre": paciente_nombre,
+                "paciente_telefono": paciente_telefono,
+                "motivo": motivo,
+                "direccion": direccion,
+                "lat": float(lat) if lat is not None else None,
+                "lng": float(lng) if lng is not None else None,
+                "distancia_km": None,
+                "metodo_pago": metodo_pago,
+                "profesional_tipo": tipo,
+                "canal_atencion": canal_atencion,
+                "video_url": video_url,
                 "expira_en": str(expira_en) if expira_en else None,
             })
             print("📤 WS enviado")
@@ -2045,6 +2102,8 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
                     "consulta_id": str(consulta_id),
                     "medico_id": str(medico_id),
                     "origen": "reasignacion",
+                    "canal_atencion": canal_atencion,
+                    "video_url": video_url or "",
                     "expira_en": str(expira_en) if expira_en else "",
                 }
             )
@@ -2552,6 +2611,11 @@ async def solicitar_consulta(
             video_url = _build_video_url(consulta_id)
             cur.execute("UPDATE consultas SET video_url = %s WHERE id = %s", (video_url, consulta_id))
             db.commit()
+            background_tasks.add_task(
+                worker_busqueda_consulta_pendiente,
+                consulta_id,
+                data.tipo,
+            )
             return {
                 "consulta_id": consulta_id,
                 "estado": "pendiente",
