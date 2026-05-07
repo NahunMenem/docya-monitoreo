@@ -15,6 +15,16 @@ import {
   RefreshCw,
   WifiOff,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const Map = dynamic(() => import("./mapa-medicos"), { ssr: false });
 
@@ -26,6 +36,29 @@ type Resumen = {
   consultas_en_curso: number;
   consultas_hoy: number;
   total_usuarios: number;
+  teleconsultas_total?: number;
+  teleconsultas_en_curso?: number;
+};
+
+type CrecimientoUsuario = {
+  fecha: string;
+  nuevos: number;
+  acumulado_periodo: number;
+};
+
+type ApiCrecimientoUsuario = {
+  fecha: string;
+  nuevos?: number | string;
+  acumulado_periodo?: number | string;
+};
+
+type ApiProfesional = {
+  id: number;
+  nombre: string;
+  tipo: "medico" | "enfermero";
+  telefono?: string | null;
+  matricula?: string;
+  disponible?: boolean;
 };
 
 type Profesional = {
@@ -44,7 +77,7 @@ function KpiCard({
   accent,
   trend,
 }: {
-  icon: any;
+  icon: LucideIcon;
   label: string;
   value?: number | string;
   accent?: string;
@@ -90,6 +123,7 @@ export default function DashboardHome() {
   const [tiempoAtencion, setTiempoAtencion] = useState<number>(0);
   const [tiempoLlegada, setTiempoLlegada] = useState<number>(0);
   const [profesionales, setProfesionales] = useState<Profesional[]>([]);
+  const [crecimientoUsuarios, setCrecimientoUsuarios] = useState<CrecimientoUsuario[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
   const medicosConectados = profesionales.filter((p) => p.tipo === "medico").length;
@@ -103,14 +137,22 @@ export default function DashboardHome() {
 
   const loadAll = async () => {
     try {
-      const [resumenData, tiempoData, llegadaData] = await Promise.all([
+      const [resumenData, tiempoData, llegadaData, crecimientoData] = await Promise.all([
         fetch(`${API}/monitoreo/resumen`).then((r) => r.json()),
         fetch(`${API}/monitoreo/tiempo_promedio`).then((r) => r.json()),
         fetch(`${API}/monitoreo/tiempo_llegada_promedio`).then((r) => r.json()),
+        fetch(`${API}/monitoreo/usuarios/crecimiento?dias=30`).then((r) => r.json()),
       ]);
       setResumen(resumenData);
       setTiempoAtencion(tiempoData.tiempo_promedio_min || 0);
       setTiempoLlegada(llegadaData.tiempo_llegada_promedio_min || 0);
+      setCrecimientoUsuarios(
+        ((crecimientoData.data || []) as ApiCrecimientoUsuario[]).map((item) => ({
+          fecha: new Date(`${item.fecha}T00:00:00`).toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit" }),
+          nuevos: Number(item.nuevos || 0),
+          acumulado_periodo: Number(item.acumulado_periodo || 0),
+        }))
+      );
     } catch {}
   };
 
@@ -119,7 +161,7 @@ export default function DashboardHome() {
       const data = await fetch(`${API}/monitoreo/medicos_mapa`).then((r) => r.json());
       if (!data.ok) { setProfesionales([]); return; }
       setProfesionales(
-        (data.profesionales || []).map((p: any) => ({
+        ((data.profesionales || []) as ApiProfesional[]).map((p) => ({
           id: p.id,
           nombre: p.nombre,
           tipo: p.tipo,
@@ -173,10 +215,62 @@ export default function DashboardHome() {
       </div>
 
       {/* KPIs row 2 */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 xl:grid-cols-5 gap-4">
         <KpiCard icon={HeartPulse} label="Total médicos registrados" value={resumen?.total_medicos} />
         <KpiCard icon={UserRound} label="Total enfermeros registrados" value={resumen?.total_enfermeros} accent="#3b82f6" />
         <KpiCard icon={Clock} label="Atención promedio" value={tiempoAtencion ? `${tiempoAtencion} min` : "—"} />
+      </div>
+
+      <div className="glass-card p-5">
+        <div className="flex items-start justify-between gap-4 mb-5">
+          <div>
+            <h2 className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
+              Nuevos usuarios
+            </h2>
+            <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+              Altas diarias de pacientes en los ultimos 30 dias
+            </p>
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <span className="badge badge-teal">
+              +{crecimientoUsuarios.reduce((sum, item) => sum + item.nuevos, 0)} nuevos
+            </span>
+            <span className="badge badge-blue">
+              {resumen?.teleconsultas_en_curso ?? 0} teleconsultas activas
+            </span>
+          </div>
+        </div>
+        <div className="h-72 min-w-0">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={crecimientoUsuarios} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="rgba(240,255,254,0.08)" vertical={false} />
+              <XAxis
+                dataKey="fecha"
+                tick={{ fill: "rgba(240,255,254,0.45)", fontSize: 11 }}
+                tickLine={false}
+                axisLine={{ stroke: "rgba(240,255,254,0.12)" }}
+                minTickGap={14}
+              />
+              <YAxis
+                allowDecimals={false}
+                tick={{ fill: "rgba(240,255,254,0.45)", fontSize: 11 }}
+                tickLine={false}
+                axisLine={false}
+              />
+              <Tooltip
+                cursor={{ fill: "rgba(20,184,166,0.08)" }}
+                contentStyle={{
+                  background: "var(--bg-surface)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: 8,
+                  color: "var(--text-primary)",
+                }}
+                labelStyle={{ color: "var(--text-secondary)" }}
+              />
+              <Bar dataKey="nuevos" name="Nuevos usuarios" fill="var(--brand-primary)" radius={[6, 6, 0, 0]} maxBarSize={34} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </div>
 
       {/* Map section */}

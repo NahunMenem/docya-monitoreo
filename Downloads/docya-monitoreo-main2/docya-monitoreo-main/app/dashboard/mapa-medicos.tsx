@@ -2,6 +2,7 @@
 // @ts-nocheck
 
 import { useEffect, useState } from "react";
+import type { ComponentProps } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
@@ -14,6 +15,16 @@ type ProfesionalMapa = {
   tipo: "medico" | "enfermero";
   lat: number;
   lng: number;
+  telefono?: string;
+  matricula?: string;
+};
+
+type ApiProfesionalMapa = {
+  id: number;
+  nombre: string;
+  tipo: "medico" | "enfermero";
+  latitud?: number | null;
+  longitud?: number | null;
   telefono?: string;
   matricula?: string;
 };
@@ -93,14 +104,14 @@ export default function MapaMedicos() {
         .then((d) => {
           if (!d.ok) return;
           setProfesionales(
-            (d.profesionales || [])
-              .filter((p: any) => p.latitud && p.longitud)
-              .map((p: any) => ({
+            ((d.profesionales || []) as ApiProfesionalMapa[])
+              .filter((p) => p.latitud && p.longitud)
+              .map((p) => ({
                 id: p.id,
                 nombre: p.nombre,
                 tipo: p.tipo,
-                lat: p.latitud,
-                lng: p.longitud,
+                lat: p.latitud as number,
+                lng: p.longitud as number,
                 telefono: p.telefono,
                 matricula: p.matricula,
               }))
@@ -116,22 +127,20 @@ export default function MapaMedicos() {
   const center: [number, number] = profesionales.length
     ? [profesionales[0].lat, profesionales[0].lng]
     : [-34.6037, -58.3816];
+  const mapProps = {
+    center,
+    zoom: 12,
+    style: { height: "100%", width: "100%" },
+    className: "z-0",
+  } as unknown as ComponentProps<typeof MapContainer>;
+  const tileLayerProps = {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+  } as unknown as ComponentProps<typeof TileLayer>;
 
   return (
-    <MapContainer
-      center={center as [number, number]}
-      zoom={12}
-      style={{ height: "100%", width: "100%" }}
-      className="z-0"
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      {...({} as any)}
-    >
-      <TileLayer
-        {...({
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-          url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
-        } as any)}
-      />
+    <MapContainer {...mapProps}>
+      <TileLayer {...tileLayerProps} />
       {profesionales.map((p) => (
         <Marker key={p.id} position={[p.lat, p.lng]} {...{ icon: makePulseIcon(p.tipo) }}>
           <Popup>

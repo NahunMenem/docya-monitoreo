@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   Search, ShieldCheck, ShieldOff, Trash2, Pencil, MessageCircle,
-  ImageIcon, X, Stethoscope, Wifi, WifiOff, Users,
+  ImageIcon, X, Stethoscope, Wifi, Users,
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE!;
@@ -27,6 +27,8 @@ type Medico = {
   foto_dni_dorso?: string;
   selfie_dni?: string;
 };
+
+type MedicoEditableKey = "full_name" | "email" | "telefono" | "especialidad" | "provincia" | "localidad";
 
 function isOnline(ping?: string | null): boolean {
   if (!ping) return false;
@@ -318,19 +320,19 @@ export default function MedicosPage() {
             onClick={(e) => e.stopPropagation()}>
             <h2 className="font-semibold text-lg mb-5" style={{ color: "var(--text-primary)" }}>Editar — {editarMedico.full_name}</h2>
             <div className="space-y-3">
-              {[
+              {([
                 { key: "full_name", label: "Nombre completo" },
                 { key: "email", label: "Email" },
                 { key: "telefono", label: "Teléfono" },
                 { key: "especialidad", label: "Especialidad" },
                 { key: "provincia", label: "Provincia" },
                 { key: "localidad", label: "Localidad" },
-              ].map(({ key, label }) => (
+              ] as { key: MedicoEditableKey; label: string }[]).map(({ key, label }) => (
                 <div key={key}>
                   <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>{label}</label>
                   <input
                     className="field-input"
-                    value={(editarMedico as any)[key] || ""}
+                    value={editarMedico[key] || ""}
                     onChange={(e) => setEditarMedico({ ...editarMedico, [key]: e.target.value })}
                   />
                 </div>

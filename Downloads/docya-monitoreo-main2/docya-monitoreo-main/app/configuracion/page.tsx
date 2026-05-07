@@ -31,6 +31,8 @@ const TIPO_LABELS: Record<string, string> = {
   nocturna: "Médico – Nocturna (22:00–06:00)",
   diurna_enfermero: "Enfermero – Diurna (06:00–22:00)",
   nocturna_enfermero: "Enfermero – Nocturna (22:00–06:00)",
+  teleconsulta_diurna: "Teleconsulta - Diurna (06:00-22:00)",
+  teleconsulta_nocturna: "Teleconsulta - Nocturna (22:00-06:00)",
 };
 
 function authHeaders() {

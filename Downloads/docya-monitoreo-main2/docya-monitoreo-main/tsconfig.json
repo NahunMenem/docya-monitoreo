@@ -30,12 +30,28 @@
   },
   "include": [
     "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
+    "app/**/*.ts",
+    "app/**/*.tsx",
+    "components/**/*.ts",
+    "components/**/*.tsx",
+    "lib/**/*.ts",
+    "types/**/*.ts",
+    "*.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    ".next",
+    "Comunidaddocya-main",
+    "DocYA landing",
+    "DOCYA-MAC-IOS-master",
+    "DOCYA-PRO-MAC-IOS-master",
+    "DOCYA-RAILWAY-main",
+    "docya-monitoreo-main",
+    "docyarecetario-main",
+    "diseño",
+    "medicamentos",
+    "tmp_mp_sdk"
   ]
 }

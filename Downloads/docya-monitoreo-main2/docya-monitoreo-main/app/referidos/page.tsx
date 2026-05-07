@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   Link2, Users, DollarSign, Copy, Check, ToggleLeft, ToggleRight,
-  X, ExternalLink, CreditCard, Clock, CheckCircle2, AlertCircle,
+  X, ExternalLink, CreditCard, Clock, CheckCircle2,
   ChevronRight,
 } from "lucide-react";
 
@@ -285,7 +285,15 @@ function TabPagos({ showToast }: { showToast: (msg: string, ok?: boolean) => voi
   const totalPagado    = groups.reduce((s, g) => s + g.monto_pagado, 0);
 
   const toggleExpand = (id: string) =>
-    setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) {
+        n.delete(id);
+      } else {
+        n.add(id);
+      }
+      return n;
+    });
 
   return (
     <div className="space-y-6">

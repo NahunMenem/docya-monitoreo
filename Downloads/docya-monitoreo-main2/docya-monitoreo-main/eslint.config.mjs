@@ -11,7 +11,20 @@ const compat = new FlatCompat({
 
 const config = [
   {
-    ignores: [".next/**", "node_modules/**"],
+    ignores: [
+      ".next/**",
+      "node_modules/**",
+      "Comunidaddocya-main/**",
+      "DocYA landing/**",
+      "DOCYA-MAC-IOS-master/**",
+      "DOCYA-PRO-MAC-IOS-master/**",
+      "DOCYA-RAILWAY-main/**",
+      "docya-monitoreo-main/**",
+      "docyarecetario-main/**",
+      "diseño/**",
+      "medicamentos/**",
+      "tmp_mp_sdk/**",
+    ],
   },
   ...compat.extends("next/core-web-vitals", "next/typescript"),
 ];

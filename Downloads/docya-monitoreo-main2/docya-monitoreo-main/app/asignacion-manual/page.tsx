@@ -2,7 +2,7 @@
 
 import Sidebar from "@/components/sidebar";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
 import { es } from "date-fns/locale";
 import {
   Calendar,
@@ -55,14 +55,9 @@ function isOnline(ping?: string | null): boolean {
   return Date.now() - new Date(ping).getTime() < 5 * 60 * 1000;
 }
 
-function formatDateInput(date: Date) {
-  return date.toISOString().slice(0, 10);
-}
-
 export default function AsignacionManualPage() {
-  const hoy = new Date();
-  const [desde, setDesde] = useState(formatDateInput(subDays(hoy, 7)));
-  const [hasta, setHasta] = useState(formatDateInput(hoy));
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
   const [consultas, setConsultas] = useState<Consulta[]>([]);
   const [medicos, setMedicos] = useState<Medico[]>([]);
   const [consultaSearch, setConsultaSearch] = useState("");
@@ -75,16 +70,21 @@ export default function AsignacionManualPage() {
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  const fetchConsultas = useCallback(async () => {
+  const fetchConsultas = useCallback(async (customDesde = desde, customHasta = hasta) => {
     setLoadingConsultas(true);
     try {
-      let fechaDesde = desde;
-      let fechaHasta = hasta;
-      if (new Date(fechaDesde) > new Date(fechaHasta)) {
-        [fechaDesde, fechaHasta] = [fechaHasta, fechaDesde];
-      }
+      let d = customDesde;
+      let h = customHasta;
+      if (d && h && new Date(d) > new Date(h)) [d, h] = [h, d];
 
-      const res = await fetch(`${API}/monitoreo/consultas/?desde=${fechaDesde}&hasta=${fechaHasta}`);
+      const params = new URLSearchParams({
+        limit: "500",
+        excluir_estados: "finalizada",
+      });
+      if (d) params.set("desde", d);
+      if (h) params.set("hasta", h);
+
+      const res = await fetch(`${API}/monitoreo/consultas/?${params.toString()}`);
       const data = await res.json();
       setConsultas(data.consultas || []);
     } finally {
@@ -97,7 +97,8 @@ export default function AsignacionManualPage() {
     try {
       const res = await fetch(`${API}/monitoreo/medicos_registrados`);
       const data = await res.json();
-      setMedicos((data.medicos || []).filter((medico: Medico) => medico.tipo === "medico"));
+      // Incluir médicos Y enfermeros
+      setMedicos(data.medicos || []);
     } finally {
       setLoadingMedicos(false);
     }
@@ -191,7 +192,7 @@ export default function AsignacionManualPage() {
           <div>
             <h1 className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>Asignación manual</h1>
             <p className="text-sm mt-0.5" style={{ color: "var(--text-muted)" }}>
-              Seleccioná una consulta y asignala manualmente a un médico.
+              Seleccioná una consulta y asignala manualmente a un médico o enfermero.
             </p>
           </div>
 
@@ -220,7 +221,7 @@ export default function AsignacionManualPage() {
                 <Stethoscope size={16} style={{ color: "#60a5fa" }} />
               </div>
               <div>
-                <p className="text-xs uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>Médicos</p>
+                <p className="text-xs uppercase tracking-[0.08em]" style={{ color: "var(--text-muted)" }}>Profesionales</p>
                 <p className="text-xl font-bold" style={{ color: "var(--text-primary)" }}>{medicos.length}</p>
               </div>
             </div>
@@ -247,6 +248,10 @@ export default function AsignacionManualPage() {
             <span className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>Rango de consultas</span>
           </div>
 
+          <p className="text-xs mb-4" style={{ color: "var(--text-muted)" }}>
+            Acá se muestran consultas asignables, incluyendo canceladas para poder reasignarlas manualmente. Las finalizadas quedan excluidas.
+          </p>
+
           <div className="flex flex-wrap gap-4 items-end">
             <div>
               <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Desde</label>
@@ -258,7 +263,7 @@ export default function AsignacionManualPage() {
               <input type="date" value={hasta} onChange={(event) => setHasta(event.target.value)} className="field-input" />
             </div>
 
-            <button onClick={fetchConsultas} disabled={loadingConsultas} className="btn-primary">
+            <button onClick={() => fetchConsultas()} disabled={loadingConsultas} className="btn-primary">
               {loadingConsultas ? "Cargando..." : "Buscar consultas"}
             </button>
           </div>
@@ -307,14 +312,20 @@ export default function AsignacionManualPage() {
                           {format(new Date(consulta.creado_en), "dd/MM/yyyy HH:mm", { locale: es })}
                         </p>
                       </div>
-
-                      <span className={`badge ${badgeClass}`}>{consulta.estado}</span>
+                      <div className="flex flex-col items-end gap-1">
+                        <span className={`badge ${badgeClass}`}>{consulta.estado}</span>
+                        {consulta.tipo && (
+                          <span className={`badge ${(consulta.tipo || "").toLowerCase().includes("enfer") ? "badge-blue" : "badge-teal"}`}>
+                            {(consulta.tipo || "").toLowerCase().includes("enfer") ? "Enfermería" : "Médica"}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
                     <div className="mt-3 space-y-2">
                       <p className="text-sm" style={{ color: "var(--text-secondary)" }}>{consulta.motivo || "Sin motivo informado"}</p>
                       <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-                        {consulta.direccion || "Sin dirección"} {consulta.tipo ? `· ${consulta.tipo}` : ""}
+                        {consulta.direccion || "Sin dirección"}
                       </p>
                       <p className="text-xs" style={{ color: "var(--text-muted)" }}>
                         Profesional actual: {consulta.profesional || "Sin asignar"}
@@ -327,7 +338,8 @@ export default function AsignacionManualPage() {
               {!loadingConsultas && consultasFiltradas.length === 0 && (
                 <div className="py-12 text-center" style={{ color: "var(--text-muted)" }}>
                   <ClipboardPlus size={24} className="mx-auto mb-2 opacity-40" />
-                  <p className="text-sm">No hay consultas para mostrar</p>
+                  <p className="text-sm">No hay consultas asignables para mostrar</p>
+                  <p className="text-xs mt-2">Si en el rango solo hay finalizadas, no van a aparecer acá.</p>
                 </div>
               )}
             </div>
@@ -336,8 +348,8 @@ export default function AsignacionManualPage() {
           <section className="glass-card overflow-hidden">
             <div className="p-4 border-b space-y-3" style={{ borderColor: "var(--border-subtle)" }}>
               <div>
-                <h2 className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>2. Elegí el médico</h2>
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Filtrá por nombre, especialidad o zona.</p>
+                <h2 className="text-base font-semibold" style={{ color: "var(--text-primary)" }}>2. Elegí el profesional</h2>
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Filtrá por nombre, especialidad o zona. Incluye médicos y enfermeros.</p>
               </div>
 
               <div className="relative">
@@ -346,7 +358,7 @@ export default function AsignacionManualPage() {
                   value={medicoSearch}
                   onChange={(event) => setMedicoSearch(event.target.value)}
                   className="field-input pl-9"
-                  placeholder="Buscar médico..."
+                  placeholder="Buscar médico o enfermero..."
                 />
               </div>
             </div>
@@ -387,6 +399,9 @@ export default function AsignacionManualPage() {
                     </div>
 
                     <div className="mt-3 flex flex-wrap gap-2">
+                      <span className={`badge ${medico.tipo === "enfermero" ? "badge-blue" : "badge-teal"}`}>
+                        {medico.tipo === "enfermero" ? "Enfermero/a" : "Médico/a"}
+                      </span>
                       {medico.especialidad && <span className="badge badge-blue">{medico.especialidad}</span>}
                       <span className="badge badge-teal">{medico.localidad || "Sin localidad"}</span>
                     </div>
@@ -407,7 +422,7 @@ export default function AsignacionManualPage() {
               {!loadingMedicos && medicosFiltrados.length === 0 && (
                 <div className="py-12 text-center" style={{ color: "var(--text-muted)" }}>
                   <Stethoscope size={24} className="mx-auto mb-2 opacity-40" />
-                  <p className="text-sm">No hay médicos para mostrar</p>
+                  <p className="text-sm">No hay profesionales para mostrar</p>
                 </div>
               )}
             </div>
@@ -445,7 +460,7 @@ export default function AsignacionManualPage() {
             <div className="rounded-2xl p-4 border" style={{ borderColor: "var(--border-subtle)", background: "rgba(255,255,255,0.02)" }}>
               <div className="flex items-center gap-2 mb-3">
                 <Stethoscope size={15} style={{ color: "#60a5fa" }} />
-                <span className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>Médico</span>
+                <span className="text-sm font-medium" style={{ color: "var(--text-secondary)" }}>Profesional</span>
               </div>
 
               {medicoSeleccionado ? (
@@ -453,11 +468,16 @@ export default function AsignacionManualPage() {
                   <p style={{ color: "var(--text-primary)" }}>
                     <strong>{medicoSeleccionado.full_name}</strong>
                   </p>
+                  <p>
+                    <span className={`badge ${medicoSeleccionado.tipo === "enfermero" ? "badge-blue" : "badge-teal"}`}>
+                      {medicoSeleccionado.tipo === "enfermero" ? "Enfermero/a" : "Médico/a"}
+                    </span>
+                  </p>
                   <p style={{ color: "var(--text-secondary)" }}>{medicoSeleccionado.especialidad || "Sin especialidad"}</p>
                   <p style={{ color: "var(--text-muted)" }}>{medicoSeleccionado.email}</p>
                 </div>
               ) : (
-                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Todavía no seleccionaste un médico.</p>
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>Todavía no seleccionaste un profesional.</p>
               )}
             </div>
           </div>
@@ -469,7 +489,8 @@ export default function AsignacionManualPage() {
             <div>
               <p className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>Forzar en camino</p>
               <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-                Si está activo, el backend recibirá `forzar_en_camino: true`.
+                Si está activo, la consulta quedará en `en_camino`.
+                No inicia la atención ni debe enviarla a consulta en curso.
               </p>
             </div>
 

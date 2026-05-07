@@ -1,4 +1,3 @@
-
 # ====================================================
 # 📌 IMPORTS Y CONFIGURACIÓN INICIAL.
 # ====================================================
@@ -41,7 +40,7 @@ from sib_api_v3_sdk.rest import ApiException
 import cloudinary
 import cloudinary.uploader
 import httpx
-from database import get_db, get_db_worker
+from database import get_db, get_db_worker, _connect_with_retry
 from settings import (
     ARG_TZ,
     ALLOWED_ORIGINS,
@@ -72,9 +71,13 @@ _eta_google_cache: Dict[int, dict] = {}
 PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS = int(
     os.getenv("PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS", "300")
 )
+PRO_ASSIGNMENT_RADIUS_KM = float(
+    os.getenv("PRO_ASSIGNMENT_RADIUS_KM", "10")
+)
 PRO_PRESENCE_OFFLINE_AFTER_SECONDS = int(
     os.getenv("PRO_PRESENCE_OFFLINE_AFTER_SECONDS", "600")
 )
+PRO_PRESENCE_OFFLINE_AFTER_SECONDS = max(PRO_PRESENCE_OFFLINE_AFTER_SECONDS, 90)
 
 # ====================================================
 # ☁️ CONFIGURACIÓN CLOUDINARY / FIREBASE
@@ -155,8 +158,9 @@ def get_access_token(app_kind: str = "pro"):
     credentials = fcm_credentials_map.get(kind)
     if credentials is None:
         raise RuntimeError(f"Firebase service account no configurada para {kind}")
-    request = google_requests.Request()
-    credentials.refresh(request)
+    if not credentials.valid or credentials.expired:
+        request = google_requests.Request()
+        credentials.refresh(request)
     return credentials.token
 
 
@@ -227,6 +231,9 @@ app.include_router(auth_router)
 
 from payments_router import router as payments_router
 app.include_router(payments_router)
+
+from routers.teleconsultas import router as teleconsultas_router
+app.include_router(teleconsultas_router)
 # ====================================================
 # 🔑 MODELOS Pydantic (Auth y Valoraciones)
 # ====================================================
@@ -266,6 +273,37 @@ class PagoIn(BaseModel):
 background_tasks = set()
 
 @app.on_event("startup")
+async def migrar_columnas_ios():
+    """Adds iOS presence columns to medicos if they don't exist yet."""
+    def _run():
+        conn = None
+        try:
+            conn = _connect_with_retry()
+            cur = conn.cursor()
+            cur.execute(
+                "ALTER TABLE medicos ADD COLUMN IF NOT EXISTS platform VARCHAR(20) DEFAULT 'android';"
+            )
+            cur.execute(
+                "ALTER TABLE medicos ADD COLUMN IF NOT EXISTS ultimo_silent_push TIMESTAMP;"
+            )
+            conn.commit()
+            print("✅ Columnas iOS en medicos verificadas/creadas")
+        except Exception as e:
+            print(f"⚠️ Error en migración columnas iOS: {e}")
+            if conn:
+                try: conn.rollback()
+                except: pass
+        finally:
+            if conn:
+                try: conn.close()
+                except: pass
+
+    import asyncio as _asyncio
+    loop = _asyncio.get_event_loop()
+    await loop.run_in_executor(None, _run)
+
+
+@app.on_event("startup")
 async def auto_importar_medicamentos():
     """
     Fuente única: el CSV en /app/medicamentos/.
@@ -276,7 +314,7 @@ async def auto_importar_medicamentos():
     def _run():
         conn = None
         try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+            conn = _connect_with_retry()
             cur = conn.cursor()
 
             # Asegurar tabla e índices
@@ -380,12 +418,12 @@ async def timeout_worker():
             # Importante: Asegurar que no empiece con una transacción colgada
             db.rollback() 
             
-            while True:
+            for _ in range(1):
                 # 1. Procesar lógica
                 await procesar_timeouts(db)
-                enviados_pastillero = procesar_recordatorios_push_pastillero(
-                    db,
-                    lambda *args, **kwargs: enviar_push(*args, app_kind="paciente", **kwargs),
+                enviar_silent_pushes_ios_disponibles(db)
+                enviados_pastillero = await asyncio.to_thread(
+                    procesar_recordatorios_push_pastillero_worker
                 )
                 if enviados_pastillero:
                     print(f"💊 Recordatorios push enviados: {enviados_pastillero}")
@@ -413,6 +451,134 @@ async def timeout_worker():
                     print("🔌 Conexión de worker cerrada limpiamente")
                 except:
                     pass
+        await asyncio.sleep(5)
+
+
+def procesar_recordatorios_push_pastillero_worker() -> int:
+    db = None
+    try:
+        db = get_db_worker()
+        return procesar_recordatorios_push_pastillero(
+            db,
+            lambda *args, **kwargs: enviar_push(*args, app_kind="paciente", **kwargs),
+        )
+    except Exception as exc:
+        print(f"⚠️ Error en worker pastillero: {exc}")
+        if db:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return 0
+    finally:
+        if db:
+            db.close()
+
+
+async def notificar_asignacion_background(medico_id: int, consulta_id: int):
+    db = None
+    cur = None
+    try:
+        db = get_db_worker()
+        cur = db.cursor()
+        await enviar_notificaciones_asignacion(medico_id, consulta_id, cur)
+    except Exception as exc:
+        print(f"Error notificando asignacion background consulta {consulta_id}: {exc}")
+    finally:
+        if cur is not None and not cur.closed:
+            cur.close()
+        if db is not None:
+            db.close()
+
+
+def asignar_pendiente_a_medico_disponible(cur, medico_id: int):
+    cur.execute("""
+        SELECT id, tipo, disponible, latitud, longitud
+        FROM medicos
+        WHERE id = %s
+    """, (medico_id,))
+    medico = cur.fetchone()
+    if not medico:
+        return None
+
+    _, tipo_medico, disponible, lat_med, lng_med = medico
+    if not disponible or lat_med is None or lng_med is None:
+        return None
+
+    cur.execute("""
+        SELECT
+            c.id,
+            COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+            CASE
+                WHEN COALESCE(c.canal_atencion, 'domicilio') = 'teleconsulta' THEN 0
+                ELSE (6371 * acos(
+                    LEAST(1, GREATEST(-1,
+                        cos(radians(c.lat)) *
+                        cos(radians(%s)) *
+                        cos(radians(%s) - radians(c.lng)) +
+                        sin(radians(c.lat)) *
+                        sin(radians(%s))
+                    ))
+                ))
+            END AS distancia
+        FROM consultas c
+        WHERE c.medico_id IS NULL
+          AND c.estado = 'pendiente'
+          AND c.tipo = %s
+          AND (c.expira_en IS NULL OR c.expira_en > NOW())
+          AND (
+            COALESCE(c.canal_atencion, 'domicilio') = 'teleconsulta'
+            OR (c.lat IS NOT NULL AND c.lng IS NOT NULL)
+          )
+          AND (
+            COALESCE(c.canal_atencion, 'domicilio') = 'teleconsulta'
+            OR (6371 * acos(
+                LEAST(1, GREATEST(-1,
+                    cos(radians(c.lat)) *
+                    cos(radians(%s)) *
+                    cos(radians(%s) - radians(c.lng)) +
+                    sin(radians(c.lat)) *
+                    sin(radians(%s))
+                ))
+            )) <= %s
+          )
+        ORDER BY c.creado_en ASC
+        LIMIT 1
+    """, (
+        lat_med, lng_med, lat_med,
+        tipo_medico,
+        lat_med, lng_med, lat_med,
+        PRO_ASSIGNMENT_RADIUS_KM,
+    ))
+
+    consulta = cur.fetchone()
+    if not consulta:
+        return None
+
+    consulta_id, canal_atencion, distancia = consulta
+    cur.execute("""
+        UPDATE consultas
+        SET medico_id = %s,
+            asignada_en = NOW(),
+            expira_en = NOW() + INTERVAL '30 seconds'
+        WHERE id = %s
+          AND medico_id IS NULL
+          AND estado = 'pendiente'
+        RETURNING id
+    """, (medico_id, consulta_id))
+
+    if cur.rowcount == 0:
+        return None
+
+    cur.execute("""
+        INSERT INTO intentos_asignacion (consulta_id, medico_id)
+        VALUES (%s, %s)
+    """, (consulta_id, medico_id))
+    print(
+        f"Consulta pendiente {consulta_id} asignada a medico {medico_id} "
+        f"por ubicacion disponible canal={canal_atencion} dist={float(distancia or 0):.2f}km"
+    )
+    return consulta_id
 
 
 # ====================================================
@@ -511,6 +677,7 @@ def referido(request: Request):
 
 class FcmTokenIn(BaseModel):
     fcm_token: str
+    platform: str = "android"  # "android" | "ios"
 
 # movido a auth_router.py
 def get_user_by_id(user_id: str, db=Depends(get_db)):
@@ -1356,11 +1523,11 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
 def actualizar_fcm_token(medico_id: int, data: FcmTokenIn, db=Depends(get_db)):
     cur = db.cursor()
     cur.execute("""
-        UPDATE medicos 
-        SET fcm_token=%s, updated_at=NOW() 
-        WHERE id=%s 
+        UPDATE medicos
+        SET fcm_token=%s, platform=%s, updated_at=NOW()
+        WHERE id=%s
         RETURNING id
-    """, (data.fcm_token, medico_id))
+    """, (data.fcm_token, data.platform, medico_id))
     row = cur.fetchone(); db.commit()
     if not row:
         raise HTTPException(status_code=404, detail="Profesional no encontrado")
@@ -1890,6 +2057,7 @@ async def intentar_reasignar(
                 return False
 
             lat, lng, tipo, medico_actual, estado_actual, canal_atencion = row
+            refrescar_medicos_con_ws_activo(cur)
 
             # Si el paciente canceló, no tiene sentido seguir
             if estado_actual in ("cancelada", "finalizada"):
@@ -1920,10 +2088,9 @@ async def intentar_reasignar(
                 FROM medicos
                 WHERE
                     disponible = TRUE
-                    AND activo = TRUE
                     AND tipo = %s
-                    AND ultimo_ping IS NOT NULL
-                    AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+                    AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+                    AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
                     AND (%s = 'teleconsulta' OR latitud IS NOT NULL)
                     AND (%s = 'teleconsulta' OR longitud IS NOT NULL)
                     AND (
@@ -1934,7 +2101,7 @@ async def intentar_reasignar(
                             cos(radians(longitud) - radians(%s)) +
                             sin(radians(%s)) *
                             sin(radians(latitud))
-                        )) <= 10
+                        )) <= %s
                     )
             """, (
                 canal_atencion,
@@ -1945,12 +2112,14 @@ async def intentar_reasignar(
                 canal_atencion,
                 canal_atencion,
                 lat, lng, lat,
+                PRO_ASSIGNMENT_RADIUS_KM,
             ))
 
             # 3️⃣ Ordenar por cercanía
             medicos = sorted(cur.fetchall(), key=lambda x: x[3])
 
             if not medicos:
+                print(f"No hay medicos disponibles en ciclo {ciclo} tipo={tipo} canal={canal_atencion} radio={PRO_ASSIGNMENT_RADIUS_KM}km ws_activos={list(active_medicos.keys())}")
                 print("❌ No hay médicos disponibles en este ciclo")
                 db.rollback() # Liberamos transacción antes de dormir
                 cur.close()
@@ -2010,6 +2179,28 @@ async def intentar_reasignar(
         await asyncio.sleep(espera_segundos)
 
     print("🔴 No se logró asignar médico tras múltiples ciclos")
+    publicados = publicar_consulta_domicilio_disponible(db, consulta_id)
+    if publicados:
+        return False
+
+    try:
+        cur_wait = db.cursor()
+        cur_wait.execute("""
+            SELECT 1
+            FROM consultas
+            WHERE id = %s
+              AND estado = 'pendiente'
+              AND medico_id IS NULL
+              AND expira_en IS NOT NULL
+              AND expira_en > NOW()
+        """, (consulta_id,))
+        if cur_wait.fetchone():
+            cur_wait.close()
+            return False
+        cur_wait.close()
+    except Exception as e:
+        print("⚠️ Error verificando consulta publicada:", e)
+
     # Verificar que la consulta no fue cancelada antes de notificar
     try:
         cur_check = db.cursor()
@@ -2102,6 +2293,15 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
                     "consulta_id": str(consulta_id),
                     "medico_id": str(medico_id),
                     "origen": "reasignacion",
+                    "paciente_uuid": str(paciente_uuid),
+                    "paciente_nombre": paciente_nombre,
+                    "paciente_telefono": paciente_telefono,
+                    "motivo": motivo or "",
+                    "direccion": direccion or "",
+                    "lat": str(lat) if lat is not None else "",
+                    "lng": str(lng) if lng is not None else "",
+                    "metodo_pago": metodo_pago or "",
+                    "profesional_tipo": tipo or "",
                     "canal_atencion": canal_atencion,
                     "video_url": video_url or "",
                     "expira_en": str(expira_en) if expira_en else "",
@@ -2115,6 +2315,147 @@ async def enviar_notificaciones_asignacion(medico_id, consulta_id, cur):
 # ====================================================
 # ⏳ PROCESADOR DE TIMEOUTS BACKEND
 # ====================================================
+def publicar_consulta_domicilio_disponible(db, consulta_id: int, radio_km: float | None = None) -> int:
+    radio = radio_km or PRO_ASSIGNMENT_RADIUS_KM
+    cur = db.cursor()
+    try:
+        _ensure_teleconsulta_columns(db)
+        cur.execute("""
+            SELECT
+                c.id,
+                c.paciente_uuid,
+                COALESCE(u.full_name, 'Paciente') AS paciente_nombre,
+                COALESCE(u.telefono, 'Sin numero') AS paciente_telefono,
+                c.motivo,
+                c.direccion,
+                c.lat,
+                c.lng,
+                c.metodo_pago,
+                c.tipo,
+                c.expira_en,
+                c.disponible_notificada_en
+            FROM consultas c
+            LEFT JOIN users u ON u.id = c.paciente_uuid
+            WHERE c.id = %s
+              AND c.estado = 'pendiente'
+              AND c.medico_id IS NULL
+              AND COALESCE(c.canal_atencion, 'domicilio') = 'domicilio'
+        """, (consulta_id,))
+        consulta = cur.fetchone()
+        if not consulta:
+            return 0
+
+        (
+            cid,
+            paciente_uuid,
+            paciente_nombre,
+            paciente_telefono,
+            motivo,
+            direccion,
+            lat,
+            lng,
+            metodo_pago,
+            tipo,
+            expira_en,
+            notificada_en,
+        ) = consulta
+
+        if notificada_en is not None:
+            return 0
+
+        cur.execute("""
+            UPDATE consultas
+            SET expira_en = COALESCE(expira_en, NOW() + INTERVAL '5 minutes'),
+                disponible_notificada_en = NOW()
+            WHERE id = %s
+              AND medico_id IS NULL
+              AND estado = 'pendiente'
+            RETURNING expira_en
+        """, (consulta_id,))
+        row_expira = cur.fetchone()
+        if not row_expira:
+            db.rollback()
+            return 0
+        expira_en = row_expira[0]
+
+        cur.execute("""
+            SELECT
+                id,
+                fcm_token,
+                (6371 * acos(
+                    LEAST(1, GREATEST(-1,
+                        cos(radians(%s)) *
+                        cos(radians(latitud)) *
+                        cos(radians(longitud) - radians(%s)) +
+                        sin(radians(%s)) *
+                        sin(radians(latitud))
+                    ))
+                )) AS distancia
+            FROM medicos
+            WHERE tipo = %s
+              AND fcm_token IS NOT NULL
+              AND fcm_token <> ''
+              AND COALESCE(validado, FALSE) = TRUE
+              AND COALESCE(matricula_validada, FALSE) = TRUE
+              AND COALESCE(matricula, '') <> ''
+              AND latitud IS NOT NULL
+              AND longitud IS NOT NULL
+              AND (6371 * acos(
+                    LEAST(1, GREATEST(-1,
+                        cos(radians(%s)) *
+                        cos(radians(latitud)) *
+                        cos(radians(longitud) - radians(%s)) +
+                        sin(radians(%s)) *
+                        sin(radians(latitud))
+                    ))
+                )) <= %s
+            ORDER BY distancia ASC
+            LIMIT 40
+        """, (lat, lng, lat, tipo, lat, lng, lat, radio))
+
+        medicos = cur.fetchall()
+        db.commit()
+
+        enviados = 0
+        for medico_id, token, distancia in medicos:
+            try:
+                enviar_push(
+                    token,
+                    "Consulta a domicilio disponible",
+                    "Hay una consulta cercana para tomar. Entrá a DocYa Pro y aceptala si podés atender ahora.",
+                    {
+                        "tipo": "consulta_domicilio_disponible",
+                        "consulta_id": str(cid),
+                        "canal_atencion": "domicilio",
+                        "paciente_uuid": str(paciente_uuid),
+                        "paciente_nombre": paciente_nombre,
+                        "paciente_telefono": paciente_telefono,
+                        "motivo": motivo or "",
+                        "direccion": direccion or "",
+                        "lat": str(lat) if lat is not None else "",
+                        "lng": str(lng) if lng is not None else "",
+                        "metodo_pago": metodo_pago or "",
+                        "profesional_tipo": tipo or "medico",
+                        "distancia_km": f"{float(distancia):.2f}" if distancia is not None else "",
+                        "expira_en": str(expira_en) if expira_en else "",
+                    },
+                    time_sensitive=True,
+                    app_kind="pro",
+                )
+                enviados += 1
+            except Exception as exc:
+                print(f"⚠️ Error push domicilio disponible médico {medico_id}: {exc}")
+
+        print(f"🏠 Consulta domicilio {consulta_id} publicada a {enviados} médicos cercanos")
+        return enviados
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Error publicando consulta domicilio disponible {consulta_id}: {exc}")
+        return 0
+    finally:
+        cur.close()
+
+
 def limpiar_medicos_disponibles_sin_ping(db) -> int:
     cur = db.cursor()
     try:
@@ -2125,8 +2466,8 @@ def limpiar_medicos_disponibles_sin_ping(db) -> int:
                 updated_at = NOW()
             WHERE disponible = TRUE
               AND (
-                ultimo_ping IS NULL
-                OR ultimo_ping < NOW() - (%s * INTERVAL '1 second')
+                COALESCE(ultimo_ping, updated_at) IS NULL
+                OR COALESCE(ultimo_ping, updated_at) < NOW() - (%s * INTERVAL '1 second')
               )
         """, (PRO_PRESENCE_OFFLINE_AFTER_SECONDS,))
         count = cur.rowcount
@@ -2142,16 +2483,83 @@ def limpiar_medicos_disponibles_sin_ping(db) -> int:
         cur.close()
 
 
+def refrescar_medicos_con_ws_activo(cur):
+    ids = list(active_medicos.keys())
+    if not ids:
+        return
+
+    cur.execute("""
+        UPDATE medicos
+        SET activo = TRUE,
+            disponible = TRUE,
+            ultimo_ping = NOW()
+        WHERE id = ANY(%s)
+    """, (ids,))
+    print(f"Presencia WS refrescada para medicos activos: {ids}")
+
+
+def enviar_silent_pushes_ios_disponibles(db) -> int:
+    """Every ~60 s: send a background silent push to available iOS doctors so they can heartbeat back."""
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT id, fcm_token
+            FROM medicos
+            WHERE disponible = TRUE
+              AND COALESCE(platform, 'android') = 'ios'
+              AND fcm_token IS NOT NULL
+              AND (
+                  ultimo_silent_push IS NULL
+                  OR ultimo_silent_push < NOW() - INTERVAL '60 seconds'
+              )
+        """)
+        rows = cur.fetchall()
+        sent = 0
+        for row in rows:
+            medico_id, fcm_token = row[0], row[1]
+            try:
+                if enviar_silent_push_ios(fcm_token, medico_id):
+                    cur.execute(
+                        "UPDATE medicos SET ultimo_silent_push = NOW() WHERE id = %s",
+                        (medico_id,)
+                    )
+                    sent += 1
+            except Exception as e:
+                print(f"⚠️ Silent push iOS médico {medico_id}: {e}")
+        db.commit()
+        if sent:
+            print(f"📡 Silent pushes iOS enviados: {sent}")
+        return sent
+    except Exception as exc:
+        db.rollback()
+        print(f"⚠️ Error enviando silent pushes iOS: {exc}")
+        return 0
+    finally:
+        cur.close()
+
+
 def liberar_medico_si_presente(cur, medico_id: int) -> None:
+    if medico_id in active_medicos:
+        cur.execute("""
+            UPDATE medicos
+            SET disponible = TRUE,
+                activo = TRUE,
+                ultimo_ping = NOW(),
+                updated_at = NOW()
+            WHERE id = %s
+        """, (medico_id,))
+        print(f"Medico {medico_id} liberado y disponible tras finalizar consulta")
+        return
+
     cur.execute("""
         UPDATE medicos
         SET disponible = (
-                ultimo_ping IS NOT NULL
-                AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+                COALESCE(ultimo_ping, updated_at) IS NOT NULL
+                AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
             ),
             activo = (
-                ultimo_ping IS NOT NULL
-                AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+                COALESCE(ultimo_ping, updated_at) IS NOT NULL
+                AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
             ),
             updated_at = NOW()
         WHERE id = %s
@@ -2168,6 +2576,53 @@ async def procesar_timeouts(db):
     try:
         ahora_arg = now_argentina()
         ahora_arg_naive = ahora_arg.replace(tzinfo=None)
+        cur.execute("""
+            SELECT id, mp_payment_id, mp_status
+            FROM consultas
+            WHERE estado = 'pendiente'
+              AND medico_id IS NULL
+              AND expira_en IS NOT NULL
+              AND expira_en <= NOW()
+        """)
+        vencidas_sin_medico = cur.fetchall()
+
+        for consulta_id_sin_medico, mp_payment_id, mp_status in vencidas_sin_medico:
+            cur.execute("""
+                UPDATE consultas
+                SET estado = 'cancelada',
+                    asignada_en = NULL,
+                    expira_en = NULL
+                WHERE id = %s
+                  AND estado = 'pendiente'
+                  AND medico_id IS NULL
+            """, (consulta_id_sin_medico,))
+
+            if mp_payment_id and mp_status in ("preautorizado", "authorized", "in_process", "pending"):
+                try:
+                    cancel_resp = requests.put(
+                        f"https://api.mercadopago.com/v1/payments/{mp_payment_id}",
+                        headers={
+                            "Authorization": f"Bearer {MP_ACCESS_TOKEN}",
+                            "X-Idempotency-Key": str(uuid.uuid4()),
+                            "Content-Type": "application/json",
+                        },
+                        json={"status": "cancelled"},
+                        timeout=20,
+                    )
+                    print(f"⏱️ Cancelación por timeout sin médico {consulta_id_sin_medico}: {cancel_resp.status_code} {cancel_resp.text}")
+                    if cancel_resp.ok:
+                        cur.execute("""
+                            UPDATE consultas
+                            SET mp_status = 'cancelled',
+                                mp_preautorizado = FALSE
+                            WHERE id = %s
+                        """, (consulta_id_sin_medico,))
+                except Exception as exc:
+                    print(f"⚠️ Error cancelando preautorización sin médico: {exc}")
+
+        if vencidas_sin_medico:
+            db.commit()
+
         cur.execute("""
             SELECT id, medico_id, expira_en
             FROM consultas
@@ -2307,11 +2762,7 @@ import psycopg2
 import os
 
 def get_db_direct():
-    dsn = os.getenv("DATABASE_URL")
-    if not dsn:
-        raise RuntimeError("❌ DATABASE_URL no está definida")
-
-    conn = psycopg2.connect(dsn, connect_timeout=5)
+    conn = _connect_with_retry()
     conn.autocommit = False
     return conn
 
@@ -2350,6 +2801,7 @@ def _ensure_teleconsulta_columns(db):
     cur = db.cursor()
     cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS canal_atencion TEXT DEFAULT 'domicilio'")
     cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS video_url TEXT")
+    cur.execute("ALTER TABLE consultas ADD COLUMN IF NOT EXISTS disponible_notificada_en TIMESTAMP")
     db.commit()
 
 
@@ -2537,6 +2989,7 @@ async def solicitar_consulta(
     consulta_id_previa = data.consulta_id
     canal_atencion = _normalizar_canal_atencion(data)
     direccion_consulta = data.direccion if canal_atencion == "domicilio" else "Teleconsulta DocYa"
+    refrescar_medicos_con_ws_activo(cur)
 
     # Evita crear duplicados cuando el cliente reintenta o hace doble tap
     # sobre el flujo de efectivo. Si ya existe una consulta abierta muy reciente
@@ -2579,10 +3032,9 @@ async def solicitar_consulta(
             SELECT id, full_name, tipo
             FROM medicos
             WHERE disponible = TRUE
-              AND activo = TRUE
               AND tipo = %s
-              AND ultimo_ping IS NOT NULL
-              AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+              AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+              AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
             ORDER BY ultimo_ping DESC NULLS LAST
             LIMIT 1
         """, (data.tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS))
@@ -2731,10 +3183,9 @@ async def solicitar_consulta(
             )) AS distancia
             FROM medicos
             WHERE disponible = TRUE
-              AND activo = TRUE
               AND tipo = %s
-              AND ultimo_ping IS NOT NULL
-              AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+              AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+              AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
               AND latitud IS NOT NULL
               AND longitud IS NOT NULL
               AND (
@@ -2742,7 +3193,7 @@ async def solicitar_consulta(
                     cos(radians(%s)) * cos(radians(latitud)) *
                     cos(radians(longitud) - radians(%s)) +
                     sin(radians(%s)) * sin(radians(latitud))
-                )) <= 10
+                )) <= %s
               )
             ORDER BY distancia ASC
             LIMIT 1;
@@ -2750,7 +3201,8 @@ async def solicitar_consulta(
             data.lat, data.lng, data.lat,
             data.tipo,
             PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
-            data.lat, data.lng, data.lat
+            data.lat, data.lng, data.lat,
+            PRO_ASSIGNMENT_RADIUS_KM
         ))
 
         row = cur.fetchone()
@@ -2766,7 +3218,7 @@ async def solicitar_consulta(
                     metodo_pago='tarjeta',
                     tipo=%s,
                     asignada_en = NOW(),
-                    expira_en = NOW() + INTERVAL '60 seconds'
+                    expira_en = NOW() + INTERVAL '5 minutes'
                 WHERE id=%s
             """, (data.tipo, consulta_id_previa))
             db.commit()
@@ -2776,11 +3228,12 @@ async def solicitar_consulta(
                 consulta_id_previa,
                 data.tipo,
             )
+            publicar_consulta_domicilio_disponible(db, consulta_id_previa)
 
             return {
                 "consulta_id": consulta_id_previa,
                 "estado": "pendiente",
-                "mensaje": "Seguimos buscando profesionales disponibles durante los próximos segundos.",
+                "mensaje": "Seguimos buscando profesionales disponibles durante hasta 5 minutos.",
                 "profesional": None
             }
 
@@ -2994,10 +3447,9 @@ async def solicitar_consulta(
         )) AS distancia
         FROM medicos
         WHERE disponible = TRUE
-          AND activo = TRUE
           AND tipo = %s
-          AND ultimo_ping IS NOT NULL
-          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+          AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+          AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
           AND (
@@ -3005,7 +3457,7 @@ async def solicitar_consulta(
                 cos(radians(%s)) * cos(radians(latitud)) *
                 cos(radians(longitud) - radians(%s)) +
                 sin(radians(%s)) * sin(radians(latitud))
-            )) <= 10
+            )) <= %s
           )
         ORDER BY distancia ASC
         LIMIT 1;
@@ -3013,7 +3465,8 @@ async def solicitar_consulta(
         data.lat, data.lng, data.lat,        # cálculo distancia (SELECT)
         data.tipo,
         PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS,
-        data.lat, data.lng, data.lat         # filtro radio <= 10 km (WHERE)
+        data.lat, data.lng, data.lat,
+        PRO_ASSIGNMENT_RADIUS_KM
     ))
 
 
@@ -3027,7 +3480,7 @@ async def solicitar_consulta(
                 direccion, lat, lng, metodo_pago, tipo,
                 asignada_en, expira_en
             )
-            VALUES (%s,NULL,'pendiente',%s,%s,%s,%s,%s,%s,NOW(), NOW() + INTERVAL '60 seconds')
+            VALUES (%s,NULL,'pendiente',%s,%s,%s,%s,%s,%s,NOW(), NOW() + INTERVAL '5 minutes')
             RETURNING id, creado_en
         """, (
             str(data.paciente_uuid),
@@ -3048,12 +3501,13 @@ async def solicitar_consulta(
             consulta_id,
             data.tipo,
         )
+        publicar_consulta_domicilio_disponible(db, consulta_id)
         asyncio.create_task(notificar_consulta_nueva_telegram(consulta_id, False))
 
         return {
             "consulta_id": consulta_id,
             "estado": "pendiente",
-            "mensaje": "Seguimos buscando profesionales disponibles durante los próximos segundos.",
+            "mensaje": "Seguimos buscando profesionales disponibles durante hasta 5 minutos.",
             "profesional": None
         }
 
@@ -3116,11 +3570,19 @@ async def solicitar_consulta(
         try:
             pro = active_medicos[profesional_id]
             creado_ts = int(creado_en.timestamp() * 1000)
+            cur.execute(
+                "SELECT full_name, telefono FROM users WHERE id=%s",
+                (str(data.paciente_uuid),),
+            )
+            paciente_row = cur.fetchone()
+            paciente_nombre = paciente_row[0] if paciente_row else "Paciente"
+            paciente_telefono = paciente_row[1] if paciente_row else "Sin número"
             await pro["ws"].send_json({
                 "tipo": "consulta_nueva",
                 "consulta_id": consulta_id,
                 "paciente_uuid": str(data.paciente_uuid),
-                "paciente_nombre": data.motivo,
+                "paciente_nombre": paciente_nombre,
+                "paciente_telefono": paciente_telefono,
                 "motivo": data.motivo,
                 "direccion": data.direccion,
                 "lat": data.lat,
@@ -3153,6 +3615,8 @@ async def solicitar_consulta(
                     "consulta_id": str(consulta_id),
                     "medico_id": str(profesional_id),
                     "origen": "asignacion",
+                    "paciente_uuid": str(data.paciente_uuid),
+                    "motivo": data.motivo,
                     "expira_en": str(expira_en) if expira_en else ""
                 }
             )
@@ -3437,6 +3901,103 @@ def consultas_asignadas(medico_id: int, db=Depends(get_db)):
 
 
 # --- Aceptar / Rechazar / En camino / Llegó / Finalizar ---
+@app.get("/consultas/disponibles/{medico_id}")
+def consultas_disponibles_cercanas(medico_id: int, db=Depends(get_db)):
+    _ensure_teleconsulta_columns(db)
+    cur = db.cursor()
+    cur.execute("""
+        SELECT id, tipo, latitud, longitud
+        FROM medicos
+        WHERE id = %s
+          AND COALESCE(validado, FALSE) = TRUE
+          AND COALESCE(matricula_validada, FALSE) = TRUE
+          AND COALESCE(matricula, '') <> ''
+    """, (medico_id,))
+    medico = cur.fetchone()
+    if not medico:
+        raise HTTPException(status_code=404, detail="Medico no encontrado o no habilitado")
+
+    _, tipo_medico, lat_med, lng_med = medico
+    if lat_med is None or lng_med is None:
+        return []
+
+    cur.execute("""
+        SELECT
+            c.id,
+            c.paciente_uuid,
+            COALESCE(u.full_name, 'Paciente') AS paciente_nombre,
+            COALESCE(u.telefono, 'Sin numero') AS paciente_telefono,
+            c.estado,
+            c.motivo,
+            c.direccion,
+            c.lat,
+            c.lng,
+            c.metodo_pago,
+            c.tipo,
+            c.creado_en,
+            c.expira_en,
+            (6371 * acos(
+                LEAST(1, GREATEST(-1,
+                    cos(radians(%s)) *
+                    cos(radians(c.lat)) *
+                    cos(radians(c.lng) - radians(%s)) +
+                    sin(radians(%s)) *
+                    sin(radians(c.lat))
+                ))
+            )) AS distancia
+        FROM consultas c
+        LEFT JOIN users u ON u.id = c.paciente_uuid
+        WHERE c.estado = 'pendiente'
+          AND c.medico_id IS NULL
+          AND c.tipo = %s
+          AND COALESCE(c.canal_atencion, 'domicilio') = 'domicilio'
+          AND c.expira_en IS NOT NULL
+          AND c.expira_en > NOW()
+          AND c.lat IS NOT NULL
+          AND c.lng IS NOT NULL
+          AND (6371 * acos(
+                LEAST(1, GREATEST(-1,
+                    cos(radians(%s)) *
+                    cos(radians(c.lat)) *
+                    cos(radians(c.lng) - radians(%s)) +
+                    sin(radians(%s)) *
+                    sin(radians(c.lat))
+                ))
+            )) <= %s
+        ORDER BY distancia ASC, c.creado_en ASC
+        LIMIT 30
+    """, (
+        lat_med, lng_med, lat_med,
+        tipo_medico,
+        lat_med, lng_med, lat_med,
+        PRO_ASSIGNMENT_RADIUS_KM,
+    ))
+
+    rows = cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "paciente_uuid": str(r[1]),
+            "paciente_nombre": r[2],
+            "paciente_telefono": r[3],
+            "estado": r[4],
+            "motivo": r[5],
+            "direccion": r[6],
+            "lat": float(r[7]) if r[7] is not None else None,
+            "lng": float(r[8]) if r[8] is not None else None,
+            "metodo_pago": r[9],
+            "tipo": r[10],
+            "canal_atencion": "domicilio",
+            "creado_en": str(r[11]) if r[11] else None,
+            "expira_en": str(r[12]) if r[12] else None,
+            "expires_at": str(r[12]) if r[12] else None,
+            "distancia_km": round(float(r[13]), 2) if r[13] is not None else None,
+            "tiempo_estimado_min": calcular_eta_local(float(r[13])) if r[13] is not None else 0,
+        }
+        for r in rows
+    ]
+
+
 @app.post("/consultas/{consulta_id}/iniciar")
 def iniciar_consulta(consulta_id: int, db=Depends(get_db)):
     cur = db.cursor()
@@ -3484,7 +4045,7 @@ def aceptar_consulta(
 
     # 1️⃣ Obtener estado actual y pago
     cur.execute("""
-        SELECT estado, medico_id, mp_payment_id, paciente_uuid
+        SELECT estado, medico_id, mp_payment_id, paciente_uuid, expira_en
         FROM consultas
         WHERE id = %s
     """, (consulta_id,))
@@ -3493,10 +4054,10 @@ def aceptar_consulta(
     if not row:
         raise HTTPException(status_code=404, detail="Consulta inexistente")
 
-    estado_actual, medico_actual, payment_id, paciente_uuid = row
+    estado_actual, medico_actual, payment_id, paciente_uuid, expira_en = row
 
     # ❌ Consulta ya no disponible para este médico
-    if estado_actual != "pendiente" or medico_actual != medico_id:
+    if estado_actual != "pendiente" or (medico_actual is not None and medico_actual != medico_id):
         # ⚠️ ESTE MENSAJE ES CLAVE PARA EL FRONT
         raise HTTPException(
             status_code=400,
@@ -3506,15 +4067,17 @@ def aceptar_consulta(
     # 2️⃣ Aceptar consulta (limpia reloj)
     cur.execute("""
         UPDATE consultas
-        SET estado = 'aceptada',
+        SET medico_id = %s,
+            estado = 'aceptada',
             aceptada_en = NOW(),
             asignada_en = NULL,
             expira_en = NULL
         WHERE id = %s
           AND estado = 'pendiente'
-          AND medico_id = %s
+          AND (medico_id = %s OR medico_id IS NULL)
+          AND (expira_en IS NULL OR expira_en > NOW())
         RETURNING id
-    """, (consulta_id, medico_id))
+    """, (medico_id, consulta_id, medico_id))
 
     updated = cur.fetchone()
     if not updated:
@@ -4039,7 +4602,7 @@ def enviar_push(
 ):
     data = data or {}
     tipo_push = str(data.get("tipo", ""))
-    if tipo_push == "consulta_nueva" and app_kind == "pro":
+    if tipo_push in ("consulta_nueva", "teleconsulta_disponible", "consulta_domicilio_disponible") and app_kind == "pro":
         android_channel_id = "docya_consultas_v2"
         android_sound = "docya_alert"
         apns_sound = "alert.caf"
@@ -4110,10 +4673,50 @@ def enviar_push(
         }
     }
 
-    r = requests.post(url, headers=headers, json=payload)
-    print("📤 Push enviado:", r.status_code, r.text)
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=5)
+        print("📤 Push enviado:", r.status_code, r.text[:300])
+    except requests.RequestException as exc:
+        print(f"⚠️ Push no enviado por timeout/red: {exc}")
 
 
+def enviar_silent_push_ios(fcm_token: str, medico_id: int) -> bool:
+    """Sends a background-only silent push to an iOS doctor to trigger a heartbeat call."""
+    project_id = get_fcm_project_id("pro")
+    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+    headers = {
+        "Authorization": f"Bearer {get_access_token('pro')}",
+        "Content-Type": "application/json; charset=UTF-8",
+    }
+    payload = {
+        "message": {
+            "token": fcm_token,
+            "data": {
+                "tipo": "heartbeat",
+                "medico_id": str(medico_id),
+            },
+            # No "notification" block → invisible to user
+            "apns": {
+                "headers": {
+                    "apns-push-type": "background",
+                    "apns-priority": "5",   # low priority required for background type
+                },
+                "payload": {
+                    "aps": {
+                        "content-available": 1,  # wake the app silently
+                    }
+                },
+            },
+        }
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=5)
+        if not r.ok:
+            print(f"⚠️ Silent push iOS médico {medico_id}: {r.status_code} {r.text[:200]}")
+        return r.ok
+    except requests.RequestException as exc:
+        print(f"⚠️ Silent push iOS médico {medico_id} error de red: {exc}")
+        return False
 
 
 # --- Certificados ---
@@ -5266,12 +5869,21 @@ async def medico_ws(websocket: WebSocket, medico_id: int):
     # ============================================================
     # 1) REGISTRAR WS (❌ NO cerrar WS previo acá)
     # ============================================================
+    previous_ws = active_medicos.get(medico_id, {}).get("ws")
     active_medicos[medico_id] = {"ws": websocket}
+
+    if previous_ws and previous_ws != websocket:
+        try:
+            await previous_ws.close(code=1000)
+            print(f"WS previo de medico {medico_id} cerrado por nueva conexion")
+        except Exception as e:
+            print(f"No se pudo cerrar WS previo de medico {medico_id}: {e}")
 
     now = now_argentina().replace(tzinfo=None)
     last_message_times[medico_id] = now
     last_ping_times[medico_id] = now
 
+    conn = None
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -5336,6 +5948,7 @@ async def medico_ws(websocket: WebSocket, medico_id: int):
             if tipo == "ping":
                 last_ping_times[medico_id] = now_argentina().replace(tzinfo=None)
 
+                conn = None
                 try:
                     conn = get_conn()
                     cur = conn.cursor()
@@ -5368,13 +5981,13 @@ async def medico_ws(websocket: WebSocket, medico_id: int):
                 monitor_tasks[medico_id].cancel()
                 monitor_tasks.pop(medico_id, None)
 
+            conn = None
             try:
                 conn = get_conn()
                 cur = conn.cursor()
                 cur.execute("""
                     UPDATE medicos
-                    SET disponible = FALSE,
-                        activo = FALSE
+                    SET ultimo_ping = COALESCE(ultimo_ping, NOW())
                     WHERE id = %s
                 """, (medico_id,))
 
@@ -5518,7 +6131,7 @@ async def generar_receta_pdf(
 ):
     try:
         # Buscar datos del médico y paciente
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn = _connect_with_retry()
         cur = conn.cursor()
 
         cur.execute("""
@@ -5613,7 +6226,7 @@ async def generar_receta_pdf(
         c.drawString(40, y, "Rp / Indicaciones:")
 
         y -= 20
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        conn = _connect_with_retry()
         cur = conn.cursor()
 
         cur.execute("""
@@ -5644,7 +6257,7 @@ async def generar_receta_pdf(
 
         if firma_url:
             try:
-                response = requests.get(firma_url)
+                response = requests.get(firma_url, timeout=8)
                 img = ImageReader(io.BytesIO(response.content))
                 c.drawImage(img, 40, y - 70, width=180, height=70, mask='auto')
             except:
@@ -5991,9 +6604,8 @@ async def hay_profesional(
         FROM medicos
         WHERE disponible = TRUE
           AND tipo = %s
-          AND activo = TRUE
-          AND ultimo_ping IS NOT NULL
-          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+          AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+          AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
     """, (tipo, PRO_PRESENCE_ASSIGNMENT_MAX_AGE_SECONDS))
@@ -6077,10 +6689,9 @@ async def pagos_notificacion(request: Request, db=Depends(get_db)):
         )) AS distancia
         FROM medicos
         WHERE disponible = TRUE
-        AND activo = TRUE
         AND tipo = %s
-        AND ultimo_ping IS NOT NULL
-        AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+        AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+        AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
         AND latitud IS NOT NULL
         AND longitud IS NOT NULL
         ORDER BY distancia ASC
@@ -6487,13 +7098,16 @@ from psycopg2.pool import SimpleConnectionPool
 POOL = SimpleConnectionPool(
     1, 20,  # min/max conexiones
     dsn=DATABASE_URL,
-    sslmode="require"
+    sslmode="require",
+    connect_timeout=5,
 )
 
 def get_conn():
     return POOL.getconn()
 
 def put_conn(conn):
+    if conn is None:
+        return
     try:
         POOL.putconn(conn)
     except:
@@ -6524,14 +7138,22 @@ async def actualizar_estado_medico(
     # 🔴 DESACTIVAR → siempre permitido
     # ============================================================
     if nuevo_estado is False:
-        with db.cursor() as cur:
-            cur.execute("""
-                UPDATE medicos
-                SET disponible = FALSE,
-                    activo = FALSE
-                WHERE id = %s
-            """, (medico_id,))
-            db.commit()
+        try:
+            with db.cursor() as cur:
+                cur.execute("""
+                    UPDATE medicos
+                    SET disponible = FALSE,
+                        activo = FALSE
+                    WHERE id = %s
+                """, (medico_id,))
+                db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"⚠️ Error desactivando médico {medico_id}: {exc}")
+            raise HTTPException(status_code=503, detail="No se pudo actualizar disponibilidad")
 
         print(f"🔴 Médico {medico_id} quedó NO disponible")
         return {
@@ -6543,15 +7165,23 @@ async def actualizar_estado_medico(
     # 🟢 ACTIVAR → permitido SIEMPRE
     # ============================================================
     if nuevo_estado is True:
-        with db.cursor() as cur:
-            cur.execute("""
-                UPDATE medicos
-                SET disponible = TRUE,
-                    activo = TRUE,
-                    ultimo_ping = NOW()
-                WHERE id = %s
-            """, (medico_id,))
-            db.commit()
+        try:
+            with db.cursor() as cur:
+                cur.execute("""
+                    UPDATE medicos
+                    SET disponible = TRUE,
+                        activo = TRUE,
+                        ultimo_ping = NOW()
+                    WHERE id = %s
+                """, (medico_id,))
+                db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            print(f"⚠️ Error activando médico {medico_id}: {exc}")
+            raise HTTPException(status_code=503, detail="No se pudo actualizar disponibilidad")
 
         ws_activo = medico_id in active_medicos
 
@@ -6725,7 +7355,12 @@ def calcular_eta_google_rutas(consulta_id, lat_med, lng_med, lat_pac, lng_pac):
 # 🟦 NUEVO ENDPOINT SIN ORS (LISTO)
 # --------------------------------------
 @app.post("/medico/{medico_id}/ubicacion")
-def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
+def actualizar_ubicacion(
+    medico_id: int,
+    data: UbicacionIn,
+    background_tasks: BackgroundTasks,
+    db=Depends(get_db),
+):
     try:
         ahora_arg = datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
 
@@ -6754,6 +7389,7 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Médico no encontrado")
 
         disponible_actual = row[0]
+        consulta_asignada_por_ubicacion = None
         print(f"📍 Médico {medico_id} → lat/lng actualizado (disponible={disponible_actual})")
 
         if not disponible_actual:
@@ -6762,6 +7398,12 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
                 print(f"Medico {medico_id} sigue no disponible por consulta activa {bloqueante[0]} estado={bloqueante[1]} creado_en={bloqueante[2]}")
             else:
                 print(f"Medico {medico_id} quedo no disponible sin consulta activa reciente")
+
+        if disponible_actual:
+            consulta_asignada_por_ubicacion = asignar_pendiente_a_medico_disponible(
+                cur,
+                medico_id,
+            )
 
         # -------------------------------------------------------
         # 2️⃣ BUSCAR CONSULTA ACTIVA SOLO EN ESTADOS VÁLIDOS
@@ -6851,6 +7493,12 @@ def actualizar_ubicacion(medico_id: int, data: UbicacionIn, db=Depends(get_db)):
             """, (lat_med, lng_med, medico_id))
 
         db.commit()
+        if consulta_asignada_por_ubicacion:
+            background_tasks.add_task(
+                notificar_asignacion_background,
+                medico_id,
+                consulta_asignada_por_ubicacion,
+            )
         cur.close()
 
         return {
@@ -6950,6 +7598,29 @@ def alias_stats(medico_id: int, db=Depends(get_db)):
 @app.post("/medicos/{medico_id}/disponibilidad")
 def alias_disponibilidad(medico_id: int, disponible: bool, db=Depends(get_db)):
     return actualizar_disponibilidad(medico_id, disponible, db)
+
+
+# --- iOS heartbeat ---
+# Called by the iOS app when it wakes up in response to a silent push.
+# Updates ultimo_ping so the backend knows the doctor is still reachable.
+@app.post("/medicos/{medico_id}/ios_heartbeat")
+def ios_heartbeat(medico_id: int, db=Depends(get_db)):
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE medicos
+        SET ultimo_ping = NOW()
+        WHERE id = %s AND COALESCE(platform, 'android') = 'ios'
+        RETURNING id, disponible
+        """,
+        (medico_id,)
+    )
+    row = cur.fetchone()
+    db.commit()
+    cur.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Médico iOS no encontrado")
+    return {"ok": True, "disponible": row[1]}
 
 
 # Carpeta de plantillas HTML
@@ -7787,8 +8458,8 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
 
     print(f"✅ WS conectado consulta {consulta_id}: {remitente_tipo} {remitente_id}")
 
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    cur = conn.cursor()
+    conn = None
+    cur = None
 
     try:
         while True:
@@ -7801,6 +8472,9 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
 
                 # Guardar en DB
                 try:
+                    if conn is None or getattr(conn, "closed", 1):
+                        conn = _connect_with_retry()
+                    cur = conn.cursor()
                     cur.execute("""
                         INSERT INTO mensajes_chat (consulta_id, remitente_tipo, remitente_id, mensaje)
                         VALUES (%s,%s,%s,%s) RETURNING id, creado_en
@@ -7809,8 +8483,18 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
                     conn.commit()
                 except Exception as e:
                     print(f"❌ Error guardando en DB: {e}")
-                    conn.rollback()
+                    if conn:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        conn.close()
+                        conn = None
                     continue
+                finally:
+                    if cur:
+                        cur.close()
+                        cur = None
 
                 msg_obj = {
                     "id": row[0],
@@ -7842,6 +8526,9 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
                 # 🔔 NOTIFICACIÓN PUSH — FIX DEFINITIVO
                 # --------------------------------------------------------
                 try:
+                    if conn is None or getattr(conn, "closed", 1):
+                        conn = _connect_with_retry()
+                    cur = conn.cursor()
                     # ------------ Paciente -> Profesional ------------
                     if remitente_tipo == "paciente":
                         cur.execute("""
@@ -7876,9 +8563,19 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
                             },
                             app_kind="pro" if remitente_tipo == "paciente" else "paciente",
                         )
+                    if cur:
+                        cur.close()
+                        cur = None
 
                 except Exception as e:
                     print(f"⚠️ Error enviando push: {e}")
+                finally:
+                    if cur:
+                        cur.close()
+                        cur = None
+                    if conn:
+                        conn.close()
+                        conn = None
 
             except Exception as e:
                 print(f"⚠️ Error en loop WS: {e}")
@@ -7887,11 +8584,16 @@ async def chat_ws(websocket: WebSocket, consulta_id: int, remitente_tipo: str, r
     except WebSocketDisconnect:
         print(f"❌ WS desconectado consulta {consulta_id}: {remitente_tipo} {remitente_id}")
     finally:
-        active_chats[consulta_id].remove(websocket)
-        if not active_chats[consulta_id]:
+        try:
+            active_chats[consulta_id].remove(websocket)
+        except (KeyError, ValueError):
+            pass
+        if consulta_id in active_chats and not active_chats[consulta_id]:
             del active_chats[consulta_id]
-        cur.close()
-        conn.close()
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @app.get("/consultas/{consulta_id}/chat")
@@ -7918,6 +8620,53 @@ def historial_chat(consulta_id: int, db=Depends(get_db)):
 
 
 # 🧾 1️⃣ Registrar un pago de consulta --------------------------------------------------------------------------------------------------------------------------
+@app.get("/chat/{consulta_id}/mensajes_no_leidos")
+def mensajes_no_leidos_chat(
+    consulta_id: int,
+    medico_id: int | None = None,
+    paciente_uuid: str | None = None,
+    db=Depends(get_db),
+):
+    cur = db.cursor()
+    try:
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'mensajes_chat'
+        """)
+        columnas = {r[0] for r in cur.fetchall()}
+        campo_lectura = next(
+            (c for c in ("leido", "leido_por_medico", "visto", "visto_por_medico") if c in columnas),
+            None,
+        )
+        if not campo_lectura:
+            return {"no_leidos": 0}
+
+        if medico_id is not None:
+            cur.execute(f"""
+                SELECT COUNT(*)
+                FROM mensajes_chat
+                WHERE consulta_id = %s
+                  AND remitente_tipo = 'paciente'
+                  AND COALESCE({campo_lectura}, FALSE) = FALSE
+            """, (consulta_id,))
+        elif paciente_uuid:
+            cur.execute(f"""
+                SELECT COUNT(*)
+                FROM mensajes_chat
+                WHERE consulta_id = %s
+                  AND remitente_tipo = 'profesional'
+                  AND COALESCE({campo_lectura}, FALSE) = FALSE
+            """, (consulta_id,))
+        else:
+            return {"no_leidos": 0}
+
+        row = cur.fetchone()
+        return {"no_leidos": int(row[0] if row else 0)}
+    finally:
+        cur.close()
+
+
 class PagoConsultaIn(BaseModel):
     consulta_id: int
     medico_id: int
@@ -8716,8 +9465,8 @@ def medicos_mapa(db=Depends(get_db)):
         FROM medicos
         WHERE activo = TRUE
           AND disponible = TRUE
-          AND ultimo_ping IS NOT NULL
-          AND ultimo_ping > NOW() - (%s * INTERVAL '1 second')
+          AND COALESCE(ultimo_ping, updated_at) IS NOT NULL
+          AND COALESCE(ultimo_ping, updated_at) > NOW() - (%s * INTERVAL '1 second')
           AND latitud IS NOT NULL
           AND longitud IS NOT NULL
         ORDER BY full_name;
@@ -8823,6 +9572,41 @@ def get_tarifa_consulta_enfermero(conn=Depends(get_db)):
 # ====================================================
 # 🗺️ ZONAS DE COBERTURA
 # ====================================================
+
+@app.get("/tarifas/teleconsulta")
+def get_tarifa_teleconsulta(conn=Depends(get_db)):
+    forced_price = get_forced_consulta_price()
+    if forced_price is not None:
+        return {
+            "tipo": "prueba",
+            "monto": forced_price,
+            "descripcion": "Monto temporal de prueba configurado desde backend.",
+        }
+
+    ahora = now_argentina()
+    h = ahora.hour
+    nocturno = h >= 22 or h < 6
+    tipo_tarifa = "teleconsulta_nocturna" if nocturno else "teleconsulta_diurna"
+
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("""
+        SELECT tipo, monto, descripcion
+        FROM tarifas_consulta
+        WHERE tipo = %s AND activa = TRUE
+        LIMIT 1
+    """, (tipo_tarifa,))
+    tarifa = cur.fetchone()
+    cur.close()
+
+    if not tarifa:
+        raise HTTPException(status_code=404, detail="Tarifa de teleconsulta no configurada")
+
+    return {
+        "tipo": tarifa["tipo"],
+        "monto": tarifa["monto"],
+        "descripcion": tarifa["descripcion"],
+    }
+
 
 @app.get("/zonas-cobertura")
 def get_zonas_cobertura(conn=Depends(get_db)):

@@ -17,8 +17,16 @@ export type Usuario = {
   created_at?: string;
 };
 
+type UsuarioForm = {
+  full_name: string;
+  email: string;
+  dni: string;
+  telefono: string;
+  password: string;
+};
+
 function ModalNuevoUsuario({ open, onClose, onSuccess }: { open: boolean; onClose: () => void; onSuccess: () => void }) {
-  const [form, setForm] = useState({ full_name: "", email: "", dni: "", telefono: "", password: "" });
+  const [form, setForm] = useState<UsuarioForm>({ full_name: "", email: "", dni: "", telefono: "", password: "" });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,7 +52,7 @@ function ModalNuevoUsuario({ open, onClose, onSuccess }: { open: boolean; onClos
     }
   };
 
-  const fields = [
+  const fields: { key: keyof UsuarioForm; label: string; type: string; placeholder: string }[] = [
     { key: "full_name", label: "Nombre completo", type: "text", placeholder: "Juan Pérez" },
     { key: "email", label: "Email", type: "email", placeholder: "juan@email.com" },
     { key: "dni", label: "DNI", type: "text", placeholder: "12345678" },
@@ -72,7 +80,7 @@ function ModalNuevoUsuario({ open, onClose, onSuccess }: { open: boolean; onClos
                 type={type}
                 placeholder={placeholder}
                 className="field-input"
-                value={(form as any)[key]}
+                value={form[key]}
                 onChange={(e) => setForm({ ...form, [key]: e.target.value })}
                 required={key !== "dni" && key !== "telefono"}
               />

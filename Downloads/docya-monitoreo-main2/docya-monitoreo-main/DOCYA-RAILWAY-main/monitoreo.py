@@ -406,6 +406,43 @@ def listar_usuarios(
         return {"ok": False, "error": str(e)}
 
 
+@router.get("/usuarios/crecimiento")
+def crecimiento_usuarios(dias: int = 30, db=Depends(get_db)):
+    dias = max(7, min(dias, 180))
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    cur.execute(
+        f"""
+        WITH fechas AS (
+            SELECT generate_series(
+                {CURRENT_ARGENTINA_DATE_SQL} - (%s::int - 1) * INTERVAL '1 day',
+                {CURRENT_ARGENTINA_DATE_SQL},
+                INTERVAL '1 day'
+            )::date AS fecha
+        ),
+        nuevos AS (
+            SELECT
+                DATE(created_at AT TIME ZONE 'America/Argentina/Buenos_Aires') AS fecha,
+                COUNT(*) AS nuevos
+            FROM users
+            WHERE role = 'patient'
+              AND created_at >= ({CURRENT_ARGENTINA_DATE_SQL} - (%s::int - 1) * INTERVAL '1 day')
+            GROUP BY 1
+        )
+        SELECT
+            fechas.fecha,
+            COALESCE(nuevos.nuevos, 0) AS nuevos,
+            SUM(COALESCE(nuevos.nuevos, 0)) OVER (ORDER BY fechas.fecha) AS acumulado_periodo
+        FROM fechas
+        LEFT JOIN nuevos ON nuevos.fecha = fechas.fecha
+        ORDER BY fechas.fecha ASC
+        """,
+        (dias, dias),
+    )
+    data = cur.fetchall()
+    cur.close()
+    return {"ok": True, "dias": dias, "data": data}
+
+
 class UsuarioCreateIn(BaseModel):
     full_name: str
     email: str
@@ -618,9 +655,35 @@ def resumen_monitoreo(db=Depends(get_db)):
         cur.execute("""
             SELECT COUNT(*) 
             FROM consultas 
-            WHERE estado IN ('aceptada', 'en_camino', 'en_domicilio');
+            WHERE estado IN (
+                'aceptada',
+                'en_camino',
+                'en_domicilio',
+                'buscando_medico',
+                'asignada',
+                'en_videollamada'
+            );
         """)
         consultas_en_curso = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM consultas
+            WHERE COALESCE(canal_atencion, '') = 'teleconsulta'
+               OR tipo = 'teleconsulta';
+        """)
+        teleconsultas_total = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM consultas
+            WHERE (
+                COALESCE(canal_atencion, '') = 'teleconsulta'
+                OR tipo = 'teleconsulta'
+            )
+              AND estado IN ('buscando_medico', 'asignada', 'en_videollamada');
+        """)
+        teleconsultas_en_curso = cur.fetchone()[0]
 
         # 📅 Consultas de hoy
         cur.execute(f"""
@@ -643,7 +706,9 @@ def resumen_monitoreo(db=Depends(get_db)):
             "enfermeros_conectados": enfermeros_conectados,
             "consultas_en_curso": consultas_en_curso,
             "consultas_hoy": consultas_hoy,
-            "total_usuarios": total_usuarios
+            "total_usuarios": total_usuarios,
+            "teleconsultas_total": teleconsultas_total,
+            "teleconsultas_en_curso": teleconsultas_en_curso
         }
 
     except Exception as e:
@@ -1107,6 +1172,9 @@ def listar_consultas(
             c.motivo,
             c.metodo_pago,
             c.direccion,
+            COALESCE(c.canal_atencion, 'domicilio') AS canal_atencion,
+            c.video_url,
+            c.daily_room_url,
 
             COALESCE(u.full_name, 'Sin paciente') AS paciente,
             COALESCE(m.full_name, 'Sin profesional') AS profesional,
