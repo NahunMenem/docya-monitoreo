@@ -2,7 +2,7 @@
 
 import Sidebar from "@/components/sidebar";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { format, subDays } from "date-fns";
+import { format } from "date-fns";
 import { es } from "date-fns/locale";
 import {
   Calendar,
@@ -27,6 +27,7 @@ type Consulta = {
   paciente: string;
   profesional?: string | null;
   tipo?: string | null;
+  canal_atencion?: string | null;
 };
 
 type Medico = {
@@ -55,12 +56,7 @@ function isOnline(ping?: string | null): boolean {
   return Date.now() - new Date(ping).getTime() < 5 * 60 * 1000;
 }
 
-function formatDateInput(date: Date) {
-  return date.toISOString().slice(0, 10);
-}
-
 export default function AsignacionManualPage() {
-  const hoy = new Date();
   const [desde, setDesde] = useState("");
   const [hasta, setHasta] = useState("");
   const [consultas, setConsultas] = useState<Consulta[]>([]);
@@ -84,7 +80,7 @@ export default function AsignacionManualPage() {
 
       const params = new URLSearchParams({
         limit: "500",
-        excluir_estados: "finalizada,cancelada",
+        excluir_estados: "finalizada",
       });
       if (d) params.set("desde", d);
       if (h) params.set("hasta", h);
@@ -119,7 +115,7 @@ export default function AsignacionManualPage() {
     if (!query) return consultas;
 
     return consultas.filter((consulta) =>
-      `${consulta.id} ${consulta.paciente} ${consulta.motivo} ${consulta.estado} ${consulta.profesional || ""} ${consulta.direccion || ""}`
+      `${consulta.id} ${consulta.paciente} ${consulta.motivo} ${consulta.estado} ${consulta.profesional || ""} ${consulta.direccion || ""} ${consulta.canal_atencion || ""}`
         .toLowerCase()
         .includes(query)
     );
@@ -293,6 +289,7 @@ export default function AsignacionManualPage() {
               {consultasFiltradas.map((consulta) => {
                 const selected = consulta.id === consultaIdSeleccionada;
                 const badgeClass = estadoBadgeClass[consulta.estado] || "badge-teal";
+                const esTeleconsulta = (consulta.canal_atencion || "").toLowerCase() === "teleconsulta";
                 return (
                   <button
                     key={consulta.id}
@@ -315,6 +312,9 @@ export default function AsignacionManualPage() {
                       </div>
                       <div className="flex flex-col items-end gap-1">
                         <span className={`badge ${badgeClass}`}>{consulta.estado}</span>
+                        <span className={`badge ${esTeleconsulta ? "badge-blue" : "badge-teal"}`}>
+                          {esTeleconsulta ? "Teleconsulta" : "Domicilio"}
+                        </span>
                         {consulta.tipo && (
                           <span className={`badge ${(consulta.tipo || "").toLowerCase().includes("enfer") ? "badge-blue" : "badge-teal"}`}>
                             {(consulta.tipo || "").toLowerCase().includes("enfer") ? "Enfermería" : "Médica"}

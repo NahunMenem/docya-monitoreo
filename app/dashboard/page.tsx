@@ -3,6 +3,14 @@
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import {
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
   Activity,
   Users,
   Stethoscope,
@@ -14,6 +22,7 @@ import {
   TrendingUp,
   RefreshCw,
   WifiOff,
+  type LucideIcon,
 } from "lucide-react";
 
 const Map = dynamic(() => import("./mapa-medicos"), { ssr: false });
@@ -26,6 +35,8 @@ type Resumen = {
   consultas_en_curso: number;
   consultas_hoy: number;
   total_usuarios: number;
+  teleconsultas_total?: number;
+  teleconsultas_en_curso?: number;
 };
 
 type Profesional = {
@@ -37,6 +48,21 @@ type Profesional = {
   disponible: boolean;
 };
 
+type ProfesionalApi = {
+  id: number;
+  nombre: string;
+  tipo: "medico" | "enfermero";
+  telefono?: string | null;
+  matricula?: string | null;
+  disponible?: boolean | null;
+};
+
+type UsuarioCrecimiento = {
+  fecha: string;
+  nuevos: number;
+  acumulado_periodo: number;
+};
+
 function KpiCard({
   icon: Icon,
   label,
@@ -44,7 +70,7 @@ function KpiCard({
   accent,
   trend,
 }: {
-  icon: any;
+  icon: LucideIcon;
   label: string;
   value?: number | string;
   accent?: string;
@@ -90,6 +116,7 @@ export default function DashboardHome() {
   const [tiempoAtencion, setTiempoAtencion] = useState<number>(0);
   const [tiempoLlegada, setTiempoLlegada] = useState<number>(0);
   const [profesionales, setProfesionales] = useState<Profesional[]>([]);
+  const [crecimientoUsuarios, setCrecimientoUsuarios] = useState<UsuarioCrecimiento[]>([]);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
   const medicosConectados = profesionales.filter((p) => p.tipo === "medico").length;
@@ -103,14 +130,16 @@ export default function DashboardHome() {
 
   const loadAll = async () => {
     try {
-      const [resumenData, tiempoData, llegadaData] = await Promise.all([
+      const [resumenData, tiempoData, llegadaData, crecimientoData] = await Promise.all([
         fetch(`${API}/monitoreo/resumen`).then((r) => r.json()),
         fetch(`${API}/monitoreo/tiempo_promedio`).then((r) => r.json()),
         fetch(`${API}/monitoreo/tiempo_llegada_promedio`).then((r) => r.json()),
+        fetch(`${API}/monitoreo/usuarios/crecimiento?dias=180`).then((r) => r.json()),
       ]);
       setResumen(resumenData);
       setTiempoAtencion(tiempoData.tiempo_promedio_min || 0);
       setTiempoLlegada(llegadaData.tiempo_llegada_promedio_min || 0);
+      setCrecimientoUsuarios(Array.isArray(crecimientoData?.data) ? crecimientoData.data : []);
     } catch {}
   };
 
@@ -119,7 +148,7 @@ export default function DashboardHome() {
       const data = await fetch(`${API}/monitoreo/medicos_mapa`).then((r) => r.json());
       if (!data.ok) { setProfesionales([]); return; }
       setProfesionales(
-        (data.profesionales || []).map((p: any) => ({
+        (data.profesionales || []).map((p: ProfesionalApi) => ({
           id: p.id,
           nombre: p.nombre,
           tipo: p.tipo,
@@ -173,10 +202,83 @@ export default function DashboardHome() {
       </div>
 
       {/* KPIs row 2 */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <KpiCard icon={HeartPulse} label="Total médicos registrados" value={resumen?.total_medicos} />
         <KpiCard icon={UserRound} label="Total enfermeros registrados" value={resumen?.total_enfermeros} accent="#3b82f6" />
+        <KpiCard icon={Activity} label="Teleconsultas en curso" value={resumen?.teleconsultas_en_curso ?? 0} accent="#06b6d4" />
         <KpiCard icon={Clock} label="Atención promedio" value={tiempoAtencion ? `${tiempoAtencion} min` : "—"} />
+      </div>
+
+      <div className="glass-card overflow-hidden">
+        <div
+          className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 border-b"
+          style={{ borderColor: "var(--border-subtle)" }}
+        >
+          <div>
+            <h2 className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
+              Nuevos usuarios - ultimos 6 meses
+            </h2>
+            <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
+              Evolucion diaria de pacientes registrados
+            </p>
+          </div>
+          <span className="badge badge-teal">
+            {crecimientoUsuarios.reduce((sum, item) => sum + Number(item.nuevos || 0), 0)} nuevos
+          </span>
+        </div>
+
+        <div className="h-72 p-4">
+          {crecimientoUsuarios.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={crecimientoUsuarios} margin={{ top: 10, right: 18, left: -12, bottom: 0 }}>
+                <XAxis
+                  dataKey="fecha"
+                  tickFormatter={(value) =>
+                    new Date(`${value}T00:00:00`).toLocaleDateString("es-AR", { month: "short" })
+                  }
+                  minTickGap={28}
+                  tick={{ fill: "var(--text-muted)", fontSize: 11 }}
+                  axisLine={{ stroke: "var(--border-subtle)" }}
+                  tickLine={false}
+                />
+                <YAxis
+                  allowDecimals={false}
+                  tick={{ fill: "var(--text-muted)", fontSize: 11 }}
+                  axisLine={false}
+                  tickLine={false}
+                />
+                <Tooltip
+                  contentStyle={{
+                    background: "var(--card-bg)",
+                    border: "1px solid var(--border-subtle)",
+                    borderRadius: 12,
+                    color: "var(--text-primary)",
+                  }}
+                  labelFormatter={(value) =>
+                    new Date(`${value}T00:00:00`).toLocaleDateString("es-AR", {
+                      day: "2-digit",
+                      month: "long",
+                      year: "numeric",
+                    })
+                  }
+                  formatter={(value: number) => [value, "Nuevos usuarios"]}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="nuevos"
+                  stroke="var(--brand-primary)"
+                  strokeWidth={2.5}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full flex items-center justify-center text-sm" style={{ color: "var(--text-muted)" }}>
+              Sin datos de crecimiento para mostrar
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Map section */}

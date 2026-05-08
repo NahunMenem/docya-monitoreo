@@ -28,6 +28,7 @@ type Consulta = {
   paciente: string;
   profesional: string;
   tipo: string;
+  canal_atencion?: string | null;
   tiempo_llegada_min?: number | null;
   duracion_atencion_min?: number | null;
 };
@@ -39,6 +40,11 @@ const estadoConfig: Record<string, { label: string; badgeClass: string }> = {
   en_domicilio: { label: "En domicilio", badgeClass: "badge-green" },
   finalizada: { label: "Finalizada", badgeClass: "badge-green" },
   cancelada: { label: "Cancelada", badgeClass: "badge-red" },
+  buscando_medico: { label: "Buscando medico", badgeClass: "badge-yellow" },
+  asignada: { label: "Asignada", badgeClass: "badge-teal" },
+  en_videollamada: { label: "En videollamada", badgeClass: "badge-blue" },
+  cancelada_sin_medico: { label: "Cancelada sin medico", badgeClass: "badge-red" },
+  cancelada_paciente: { label: "Cancelada paciente", badgeClass: "badge-red" },
 };
 
 const estadosList = [
@@ -132,8 +138,18 @@ export default function ConsultasPage() {
 
   const filtradas = useMemo(() =>
     consultas.filter((c) =>
-      `${c.paciente} ${c.profesional} ${c.motivo} ${c.estado}`.toLowerCase().includes(search.toLowerCase())
+      `${c.paciente} ${c.profesional} ${c.motivo} ${c.estado} ${c.canal_atencion || ""}`.toLowerCase().includes(search.toLowerCase())
     ), [consultas, search]);
+
+  const totalTeleconsultas = useMemo(
+    () => consultas.filter((c) => (c.canal_atencion || "").toLowerCase() === "teleconsulta").length,
+    [consultas]
+  );
+
+  const totalDomicilio = useMemo(
+    () => consultas.filter((c) => (c.canal_atencion || "domicilio").toLowerCase() !== "teleconsulta").length,
+    [consultas]
+  );
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
@@ -178,6 +194,14 @@ export default function ConsultasPage() {
             <p className="text-xs mb-1" style={{ color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Total</p>
             <p className="text-2xl font-bold" style={{ color: "var(--brand-primary)" }}>{total}</p>
           </div>
+          <div className="kpi-card">
+            <p className="text-xs mb-1" style={{ color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Domicilio</p>
+            <p className="text-2xl font-bold" style={{ color: "var(--text-primary)" }}>{totalDomicilio}</p>
+          </div>
+          <div className="kpi-card">
+            <p className="text-xs mb-1" style={{ color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Teleconsultas</p>
+            <p className="text-2xl font-bold" style={{ color: "#06b6d4" }}>{totalTeleconsultas}</p>
+          </div>
           {estadosList.map(({ key, label, icon: Icon }) => (
             <div key={key} className="kpi-card">
               <div className="flex items-center gap-1 mb-1">
@@ -215,7 +239,7 @@ export default function ConsultasPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  {["ID", "Fecha", "Estado", "Paciente", "Profesional", "Tipo consulta", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
+                  {["ID", "Fecha", "Estado", "Paciente", "Profesional", "Canal", "Tipo consulta", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
                     <th key={h}>{h}</th>
                   ))}
                 </tr>
@@ -225,6 +249,7 @@ export default function ConsultasPage() {
                   const est = estadoConfig[c.estado] || { label: c.estado, badgeClass: "badge-teal" };
                   const tipoLower = (c.tipo || "").toLowerCase();
                   const esEnfermeria = tipoLower.includes("enfer");
+                  const esTeleconsulta = (c.canal_atencion || "").toLowerCase() === "teleconsulta";
                   return (
                     <tr key={c.id}>
                       <td className="font-mono text-xs" style={{ color: "var(--text-muted)" }}>#{c.id}</td>
@@ -232,6 +257,11 @@ export default function ConsultasPage() {
                       <td><span className={`badge ${est.badgeClass}`}>{est.label}</span></td>
                       <td className="font-medium" style={{ color: "var(--text-primary)" }}>{c.paciente}</td>
                       <td>{c.profesional}</td>
+                      <td>
+                        <span className={`badge ${esTeleconsulta ? "badge-blue" : "badge-teal"}`}>
+                          {esTeleconsulta ? "Teleconsulta" : "Domicilio"}
+                        </span>
+                      </td>
                       <td>
                         <span className={`badge ${esEnfermeria ? "badge-blue" : "badge-teal"}`}>
                           {esEnfermeria ? "Enfermería" : "Médica"}
