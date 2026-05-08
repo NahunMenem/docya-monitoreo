@@ -9596,10 +9596,32 @@ def get_tarifa_teleconsulta(conn=Depends(get_db)):
         LIMIT 1
     """, (tipo_tarifa,))
     tarifa = cur.fetchone()
-    cur.close()
 
     if not tarifa:
-        raise HTTPException(status_code=404, detail="Tarifa de teleconsulta no configurada")
+        descripcion = (
+            "Teleconsulta diurna DocYa."
+            if tipo_tarifa == "teleconsulta_diurna"
+            else "Teleconsulta nocturna DocYa."
+        )
+        cur.execute("""
+            UPDATE tarifas_consulta
+            SET activa = TRUE,
+                monto = COALESCE(monto, 15000),
+                descripcion = COALESCE(descripcion, %s)
+            WHERE tipo = %s
+            RETURNING tipo, monto, descripcion
+        """, (descripcion, tipo_tarifa))
+        tarifa = cur.fetchone()
+        if not tarifa:
+            cur.execute("""
+                INSERT INTO tarifas_consulta (tipo, monto, descripcion, activa)
+                VALUES (%s, 15000, %s, TRUE)
+                RETURNING tipo, monto, descripcion
+            """, (tipo_tarifa, descripcion))
+            tarifa = cur.fetchone()
+        conn.commit()
+
+    cur.close()
 
     return {
         "tipo": tarifa["tipo"],
@@ -9630,6 +9652,18 @@ def get_zonas_cobertura(conn=Depends(get_db)):
 @app.get("/admin/tarifas")
 def get_all_tarifas(conn=Depends(get_db)):
     cur = conn.cursor(cursor_factory=RealDictCursor)
+    # Garantizar que las tarifas de teleconsulta existan para poder gestionarlas desde el panel
+    for tipo, desc in [
+        ("teleconsulta_diurna", "Teleconsulta diurna DocYa."),
+        ("teleconsulta_nocturna", "Teleconsulta nocturna DocYa."),
+    ]:
+        cur.execute("SELECT 1 FROM tarifas_consulta WHERE tipo = %s", (tipo,))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO tarifas_consulta (tipo, monto, descripcion, activa) VALUES (%s, 15000, %s, TRUE)",
+                (tipo, desc),
+            )
+    conn.commit()
     cur.execute("SELECT * FROM tarifas_consulta ORDER BY tipo ASC")
     tarifas = cur.fetchall()
     cur.close()
