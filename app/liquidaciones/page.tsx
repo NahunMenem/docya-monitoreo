@@ -13,7 +13,6 @@ import {
   ReceiptText,
   RefreshCw,
   Search,
-  Video,
   Wallet,
   X,
 } from "lucide-react";
@@ -29,6 +28,13 @@ type Profesional = {
   domicilio_cantidad: number;
   domicilio_neto: number;
   domicilio_comision: number;
+  domicilio_efectivo_cantidad?: number;
+  domicilio_efectivo_bruto?: number;
+  domicilio_efectivo_comision?: number;
+  domicilio_app_cantidad?: number;
+  domicilio_app_bruto?: number;
+  domicilio_app_neto?: number;
+  domicilio_app_comision?: number;
   tele_cantidad: number;
   tele_neto: number;
   tele_comision: number;
@@ -98,6 +104,42 @@ function consultaLabel(tipo: string, plural = true) {
       : "consulta";
 }
 
+function liquidacionDetalle(prof: Profesional) {
+  const efectivoBruto = prof.domicilio_efectivo_bruto ?? 0;
+  const efectivoComision =
+    prof.domicilio_efectivo_comision ?? efectivoBruto * 0.2;
+  const efectivoNeto = Math.max(efectivoBruto - efectivoComision, 0);
+  const appBruto = prof.domicilio_app_bruto ?? 0;
+  const appNeto = prof.domicilio_app_neto ?? 0;
+  const appComision = prof.domicilio_app_comision ?? Math.max(appBruto - appNeto, 0);
+  const teleNeto = prof.tele_neto ?? 0;
+  const teleComision = prof.tele_comision ?? 0;
+  const saldoDisponible = Math.max(prof.saldo, 0);
+  const saldoRegularizar = Math.max(-prof.saldo, 0);
+  const compensadoORegularizado = Math.max(
+    efectivoComision - saldoRegularizar,
+    0,
+  );
+  const totalProfesional = efectivoNeto + appNeto + teleNeto;
+  const totalComision = efectivoComision + appComision + teleComision;
+
+  return {
+    efectivoBruto,
+    efectivoComision,
+    efectivoNeto,
+    appBruto,
+    appNeto,
+    appComision,
+    teleNeto,
+    teleComision,
+    saldoDisponible,
+    saldoRegularizar,
+    compensadoORegularizado,
+    totalProfesional,
+    totalComision,
+  };
+}
+
 function ModalRegistrarMovimiento({
   prof,
   operacion,
@@ -118,12 +160,12 @@ function ModalRegistrarMovimiento({
   const [error, setError] = useState("");
 
   const title = isComision
-    ? "Marcar comision recibida"
+    ? "Marcar regularizacion recibida"
     : "Registrar pago al profesional";
   const description = isComision
-    ? "Usa esta accion cuando el medico/enfermero ya transfirio a DocYa el 20% de lo cobrado en efectivo."
-    : "Usa esta accion cuando DocYa ya le transfirio al profesional lo que estaba pendiente por pagos desde la app.";
-  const submitLabel = isComision ? "Marcar como recibida" : "Marcar como pagada";
+    ? "Usa esta accion cuando el profesional ya transfirio a DocYa el saldo pendiente de regularizar."
+    : "Usa esta accion cuando DocYa ya le transfirio al profesional lo disponible para cobrar.";
+  const submitLabel = isComision ? "Regularizacion recibida" : "Marcar como pagado";
   const signedAmount = isComision
     ? -Math.abs(Number(monto || 0))
     : Math.abs(Number(monto || 0));
@@ -179,7 +221,7 @@ function ModalRegistrarMovimiento({
                   color: isComision ? "#fbbf24" : "var(--brand-primary-light)",
                 }}
               >
-                {isComision ? "Comision DocYa" : "Pago profesional"}
+                {isComision ? "Regularizacion DocYa" : "Pago profesional"}
               </span>
             </div>
             <h2
@@ -252,7 +294,7 @@ function ModalRegistrarMovimiento({
 
         <label className="mt-3 block space-y-1">
           <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-            Monto ({isComision ? "transferido a DocYa" : "pagado"})
+            Monto ({isComision ? "recibido por DocYa" : "pagado"})
           </span>
           <input
             type="number"
@@ -333,9 +375,12 @@ function ProfesionalCard({
   const isCobrarComision = prof.saldo < 0;
   const isPagarProfesional = prof.saldo > 0;
   const isCero = prof.saldo === 0;
-  const totalNeto = prof.domicilio_neto + prof.tele_neto;
-  const totalComision = prof.domicilio_comision + prof.tele_comision;
+  const detalle = liquidacionDetalle(prof);
   const labelPlural = consultaLabel(prof.tipo);
+  const efectivoCantidad =
+    prof.domicilio_efectivo_cantidad ?? (detalle.efectivoBruto > 0 ? prof.domicilio_cantidad : 0);
+  const appCantidad =
+    prof.domicilio_app_cantidad ?? (detalle.appNeto > 0 ? prof.domicilio_cantidad : 0);
 
   const loadHistorial = async () => {
     if (historial.length) return;
@@ -401,31 +446,32 @@ function ProfesionalCard({
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:w-[680px]">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:w-[760px]">
           <MiniMetric
             icon={Home}
-            label="Domicilio"
-            value={pesos(prof.domicilio_neto)}
-            detail={`${prof.domicilio_cantidad} ${labelPlural}`}
-          />
-          <MiniMetric
-            icon={Video}
-            label="Teleconsulta"
-            value={prof.tele_cantidad > 0 ? pesos(prof.tele_neto) : "-"}
-            detail={`${prof.tele_cantidad} teleconsultas`}
-          />
-          <MiniMetric
-            icon={ReceiptText}
-            label="Comision 20%"
-            value={pesos(totalComision)}
-            detail="DocYa generado"
-            tone="yellow"
+            label="Efectivo cobrado"
+            value={pesos(detalle.efectivoBruto)}
+            detail={`${efectivoCantidad} ${labelPlural}`}
           />
           <MiniMetric
             icon={Wallet}
-            label="Saldo actual"
-            value={pesosConSigno(prof.saldo)}
-            detail={isCobrarComision ? "A cobrar" : isPagarProfesional ? "A pagar" : "Cero"}
+            label="App neto"
+            value={pesos(detalle.appNeto)}
+            detail={`${appCantidad} pagos app`}
+            tone="blue"
+          />
+          <MiniMetric
+            icon={ReceiptText}
+            label="Comision DocYa"
+            value={pesos(detalle.totalComision)}
+            detail="20% generado"
+            tone="yellow"
+          />
+          <MiniMetric
+            icon={isPagarProfesional ? ArrowUpFromLine : isCobrarComision ? ArrowDownToLine : BadgeCheck}
+            label={isPagarProfesional ? "Disponible para pagar" : isCobrarComision ? "Saldo a regularizar" : "Cuenta al dia"}
+            value={pesos(isPagarProfesional ? detalle.saldoDisponible : detalle.saldoRegularizar)}
+            detail={isPagarProfesional ? "Transferir al profesional" : isCobrarComision ? "Debe a DocYa" : "Saldo en cero"}
             tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
           />
         </div>
@@ -438,7 +484,7 @@ function ProfesionalCard({
               style={{ background: "#f59e0b", color: "#fff" }}
             >
               <ArrowDownToLine size={16} />
-              Marcar comision pagada
+              Marcar regularizacion
             </button>
           ) : (
             <button
@@ -465,11 +511,12 @@ function ProfesionalCard({
       </div>
 
       <div
-        className="mt-4 grid gap-3 rounded-xl p-3 md:grid-cols-3"
+        className="mt-4 grid gap-3 rounded-xl p-3 md:grid-cols-4"
         style={{ background: "var(--input-bg)" }}
       >
-        <InfoLine label="Total profesional neto" value={pesos(totalNeto)} />
-        <InfoLine label="Comision DocYa generada" value={pesos(totalComision)} />
+        <InfoLine label="Neto por efectivo" value={pesos(detalle.efectivoNeto)} />
+        <InfoLine label="Neto por app" value={pesos(detalle.appNeto)} />
+        <InfoLine label="Compensado/regularizado" value={pesos(detalle.compensadoORegularizado)} />
         <InfoLine
           label="Ultimo movimiento"
           value={
@@ -477,6 +524,39 @@ function ProfesionalCard({
               ? `${fmtDate(prof.ultima_liquidacion)} - ${pesosConSigno(prof.ultimo_monto ?? 0)}`
               : "Sin movimientos"
           }
+        />
+      </div>
+
+      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+        <BreakdownPanel
+          title="Efectivo"
+          subtitle="El profesional ya recibio este dinero del paciente."
+          rows={[
+            ["Cobrado al paciente", pesos(detalle.efectivoBruto)],
+            ["Comision DocYa 20%", `-${pesos(detalle.efectivoComision)}`],
+            ["Neto profesional", pesos(detalle.efectivoNeto)],
+          ]}
+          tone="green"
+        />
+        <BreakdownPanel
+          title="Pagos por app"
+          subtitle="DocYa recauda y luego transfiere el neto."
+          rows={[
+            ["Pagado por pacientes", pesos(detalle.appBruto)],
+            ["Comision DocYa 20%", `-${pesos(detalle.appComision)}`],
+            ["Neto a profesional", pesos(detalle.appNeto)],
+          ]}
+          tone="blue"
+        />
+        <BreakdownPanel
+          title="Saldo final"
+          subtitle="Resultado despues de compensar movimientos."
+          rows={[
+            ["Disponible para transferir", pesos(detalle.saldoDisponible)],
+            ["Saldo pendiente de regularizar", pesos(detalle.saldoRegularizar)],
+            ["Total ganado profesional", pesos(detalle.totalProfesional)],
+          ]}
+          tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
         />
       </div>
 
@@ -519,7 +599,7 @@ function ProfesionalCard({
                           : "var(--brand-primary-light)",
                     }}
                   >
-                    {liq.monto_pagado < 0 ? "Comision recibida " : "Pago realizado "}
+                    {liq.monto_pagado < 0 ? "Regularizacion recibida " : "Pago realizado "}
                     {pesosConSigno(liq.monto_pagado)}
                   </span>
                   <span className="md:text-right" style={{ color: "var(--text-muted)" }}>
@@ -546,7 +626,7 @@ function MiniMetric({
   label: string;
   value: string;
   detail: string;
-  tone?: "teal" | "yellow" | "red" | "green";
+  tone?: "teal" | "yellow" | "red" | "green" | "blue";
 }) {
   const color =
     tone === "yellow"
@@ -555,7 +635,9 @@ function MiniMetric({
         ? "#f87171"
         : tone === "green"
           ? "#4ade80"
-          : "var(--brand-primary-light)";
+          : tone === "blue"
+            ? "#60a5fa"
+            : "var(--brand-primary-light)";
   return (
     <div
       className="rounded-xl p-3"
@@ -576,6 +658,58 @@ function MiniMetric({
       <p className="text-xs" style={{ color: "var(--text-muted)" }}>
         {detail}
       </p>
+    </div>
+  );
+}
+
+function BreakdownPanel({
+  title,
+  subtitle,
+  rows,
+  tone,
+}: {
+  title: string;
+  subtitle: string;
+  rows: [string, string][];
+  tone: "teal" | "green" | "blue" | "red";
+}) {
+  const color =
+    tone === "green"
+      ? "#4ade80"
+      : tone === "blue"
+        ? "#60a5fa"
+        : tone === "red"
+          ? "#f87171"
+          : "var(--brand-primary-light)";
+
+  return (
+    <div
+      className="rounded-xl p-4"
+      style={{
+        background: "rgba(255,255,255,0.025)",
+        border: "1px solid var(--border-subtle)",
+      }}
+    >
+      <div className="mb-3">
+        <p className="text-sm font-black" style={{ color }}>
+          {title}
+        </p>
+        <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
+          {subtitle}
+        </p>
+      </div>
+      <div className="space-y-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-start justify-between gap-3">
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+              {label}
+            </span>
+            <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>
+              {value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -692,7 +826,15 @@ export default function LiquidacionesPage() {
     0,
   );
   const totalComisionGenerada = profesionales.reduce(
-    (a, p) => a + p.domicilio_comision + p.tele_comision,
+    (a, p) => a + liquidacionDetalle(p).totalComision,
+    0,
+  );
+  const totalEfectivoBruto = profesionales.reduce(
+    (a, p) => a + liquidacionDetalle(p).efectivoBruto,
+    0,
+  );
+  const totalAppNeto = profesionales.reduce(
+    (a, p) => a + liquidacionDetalle(p).appNeto,
     0,
   );
 
@@ -747,24 +889,24 @@ export default function LiquidacionesPage() {
           />
           <SummaryCard
             icon={ArrowUpFromLine}
-            label="Pagos a profesionales"
+            label="Disponible para pagar"
             value={pesos(totalAPagar)}
             color="var(--brand-primary-light)"
-            helper={`${conPago} profesionales con saldo positivo`}
+            helper={`${conPago} profesionales con transferencia pendiente`}
           />
           <SummaryCard
             icon={ReceiptText}
-            label="Comision generada"
-            value={pesos(totalComisionGenerada)}
+            label="Cobrado en efectivo"
+            value={pesos(totalEfectivoBruto)}
             color="#60a5fa"
-            helper="20% acumulado en consultas registradas"
+            helper="Dinero que recibieron directo los profesionales"
           />
           <SummaryCard
             icon={BadgeCheck}
-            label="Actividad total"
-            value={totalConsultas}
+            label="Neto por app"
+            value={pesos(totalAppNeto)}
             color="#a78bfa"
-            helper="Consultas y servicios registrados"
+            helper={`${totalConsultas} consultas/servicios, comision DocYa ${pesos(totalComisionGenerada)}`}
           />
         </section>
 
@@ -847,7 +989,7 @@ export default function LiquidacionesPage() {
           onDone={() => {
             const okMsg =
               modal.operacion === "comision_recibida"
-                ? "Comision marcada como recibida"
+                ? "Regularizacion marcada como recibida"
                 : "Pago marcado como realizado";
             setModal(null);
             showToast(okMsg);
