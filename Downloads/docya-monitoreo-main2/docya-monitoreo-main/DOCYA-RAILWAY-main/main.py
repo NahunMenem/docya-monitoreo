@@ -9297,9 +9297,13 @@ def registrar_pago(consulta_id: int, data: PagoConsultaIn, db=Depends(get_db)):
 
 
 @app.get("/admin/liquidaciones/resumen")
-def resumen_liquidaciones(db=Depends(get_db)):
+def resumen_liquidaciones(
+    db=Depends(get_db),
+    desde: Optional[str] = None,
+    hasta: Optional[str] = None,
+):
     """Resumen de saldos y consultas por profesional para el panel de liquidaciones."""
-    return _resumen_liquidaciones_seguro(db)
+    return _resumen_liquidaciones_seguro(db, desde=desde, hasta=hasta)
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
@@ -9430,7 +9434,7 @@ def resumen_liquidaciones(db=Depends(get_db)):
     return [dict(r) for r in rows]
 
 
-def _resumen_liquidaciones_seguro(db):
+def _resumen_liquidaciones_seguro(db, desde: str | None = None, hasta: str | None = None):
     cur = db.cursor(cursor_factory=RealDictCursor)
     try:
         def table_exists(table_name: str) -> bool:
@@ -9510,10 +9514,31 @@ def _resumen_liquidaciones_seguro(db):
                 "tele_cantidad": 0,
                 "tele_neto": 0,
                 "tele_comision": 0,
+                "domicilio_diurna_cantidad": 0,
+                "domicilio_nocturna_cantidad": 0,
                 "ultima_liquidacion": None,
                 "ultimo_monto": None,
             })
             profesionales[item["id"]] = item
+
+        # Construir filtros de fecha reutilizables
+        date_filter_pagos = ""
+        date_params_base: list = []
+        if desde:
+            date_filter_pagos += " AND p.fecha::date >= %s"
+            date_params_base.append(desde)
+        if hasta:
+            date_filter_pagos += " AND p.fecha::date <= %s"
+            date_params_base.append(hasta)
+
+        date_filter_tele = ""
+        date_params_tele: list = []
+        if desde:
+            date_filter_tele += " AND COALESCE(c.fin_atencion, c.fin_video_at)::date >= %s"
+            date_params_tele.append(desde)
+        if hasta:
+            date_filter_tele += " AND COALESCE(c.fin_atencion, c.fin_video_at)::date <= %s"
+            date_params_tele.append(hasta)
 
         if has_pagos:
             canal_filtro = "COALESCE(c.canal_atencion, 'domicilio') != 'teleconsulta'" if has_canal else "COALESCE(c.tipo, '') != 'teleconsulta'"
@@ -9550,12 +9575,20 @@ def _resumen_liquidaciones_seguro(db):
                         COALESCE(SUM(CASE
                             WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) <> 'efectivo'
                             THEN p.docya_comision ELSE 0 END), 0
-                        ) AS app_comision
+                        ) AS app_comision,
+                        COUNT(*) FILTER (
+                            WHERE EXTRACT(HOUR FROM (p.fecha AT TIME ZONE 'America/Argentina/Buenos_Aires')) >= 6
+                              AND EXTRACT(HOUR FROM (p.fecha AT TIME ZONE 'America/Argentina/Buenos_Aires')) < 22
+                        ) AS diurna_cantidad,
+                        COUNT(*) FILTER (
+                            WHERE EXTRACT(HOUR FROM (p.fecha AT TIME ZONE 'America/Argentina/Buenos_Aires')) < 6
+                               OR EXTRACT(HOUR FROM (p.fecha AT TIME ZONE 'America/Argentina/Buenos_Aires')) >= 22
+                        ) AS nocturna_cantidad
                     FROM pagos_consulta p
                     LEFT JOIN consultas c ON c.id = p.consulta_id
-                    WHERE {canal_filtro}
+                    WHERE {canal_filtro} {date_filter_pagos}
                     GROUP BY p.medico_id
-                """)
+                """, date_params_base)
                 for row in cur.fetchall():
                     item = profesionales.get(row["medico_id"])
                     if not item:
@@ -9571,6 +9604,8 @@ def _resumen_liquidaciones_seguro(db):
                         "domicilio_app_bruto": float(row["app_bruto"] or 0),
                         "domicilio_app_neto": float(row["app_neto"] or 0),
                         "domicilio_app_comision": float(row["app_comision"] or 0),
+                        "domicilio_diurna_cantidad": int(row["diurna_cantidad"] or 0),
+                        "domicilio_nocturna_cantidad": int(row["nocturna_cantidad"] or 0),
                     })
 
             safe_section("pagos domicilio", cargar_domicilio)
@@ -9587,9 +9622,9 @@ def _resumen_liquidaciones_seguro(db):
                         COALESCE(SUM(p.docya_comision), 0) AS comision
                     FROM pagos_consulta p
                     JOIN consultas c ON c.id = p.consulta_id
-                    WHERE {tele_filtro}
+                    WHERE {tele_filtro} {date_filter_pagos}
                     GROUP BY p.medico_id
-                """)
+                """, date_params_base)
                 for row in cur.fetchall():
                     item = profesionales.get(row["medico_id"])
                     if item:
@@ -9618,8 +9653,9 @@ def _resumen_liquidaciones_seguro(db):
                       AND c.estado = 'finalizada'
                       AND c.medico_id IS NOT NULL
                       {not_exists}
+                      {date_filter_tele}
                     GROUP BY c.medico_id
-                """)
+                """, date_params_tele)
                 for row in cur.fetchall():
                     item = profesionales.get(row["medico_id"])
                     if item:
