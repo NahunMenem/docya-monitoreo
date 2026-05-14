@@ -1715,19 +1715,28 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
     inicio_semana = start_of_week_argentina()
     fin_semana = inicio_semana + timedelta(days=6)
 
-    # Lee los pagos reales de la semana con canal y horario
+    # Lee consultas finalizadas de la semana con pago si existe (LEFT JOIN
+    # para incluir teleconsultas que no tienen entrada en pagos_consulta)
     cur.execute(
         f"""
         SELECT
-            COALESCE(c.canal_atencion, 'domicilio') AS canal,
-            COALESCE(pc.metodo_pago, 'efectivo')    AS metodo_pago,
-            COALESCE(pc.monto_total, 0)             AS monto_total,
-            COALESCE(pc.medico_neto, 0)             AS medico_neto,
-            c.fin_atencion
-        FROM pagos_consulta pc
-        JOIN consultas c ON c.id = pc.consulta_id
-        WHERE pc.medico_id = %s
-        AND DATE_TRUNC('week', pc.fecha) = {CURRENT_ARGENTINA_WEEK_SQL}
+            COALESCE(c.canal_atencion, 'domicilio')                  AS canal,
+            COALESCE(pc.metodo_pago, c.metodo_pago, 'efectivo')      AS metodo_pago,
+            COALESCE(pc.monto_total, c.precio_final, 0)              AS monto_total,
+            COALESCE(pc.medico_neto, 0)                              AS medico_neto,
+            COALESCE(c.fin_atencion, c.fin_video_at)                 AS fin_momento
+        FROM consultas c
+        LEFT JOIN LATERAL (
+            SELECT metodo_pago, monto_total, medico_neto
+            FROM pagos_consulta
+            WHERE consulta_id = c.id AND medico_id = c.medico_id
+            ORDER BY fecha DESC NULLS LAST
+            LIMIT 1
+        ) pc ON TRUE
+        WHERE c.medico_id = %s
+          AND c.estado = 'finalizada'
+          AND DATE_TRUNC('week', COALESCE(c.fin_atencion, c.fin_video_at))
+              = {CURRENT_ARGENTINA_WEEK_SQL}
         """,
         (medico_id,),
     )
@@ -1742,7 +1751,7 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
     metodo_contador: dict = {}
     detalle_pagos: dict = {}
 
-    for canal, metodo, monto_total, medico_neto, fin_atencion in pagos:
+    for canal, metodo, monto_total, medico_neto, fin_momento in pagos:
         monto = int(monto_total)
         neto = int(medico_neto)
         metodo_contador[metodo] = metodo_contador.get(metodo, 0) + 1
@@ -1757,8 +1766,8 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
 
         # Horario
         es_nocturna = False
-        if fin_atencion:
-            hora = fin_atencion.time()
+        if fin_momento:
+            hora = fin_momento.time()
             es_nocturna = (hora >= time(22, 0)) or (hora < time(6, 0))
 
         if es_nocturna:
