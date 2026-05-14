@@ -78,12 +78,21 @@ SEXOS_VALIDOS = {"masculino", "femenino", "otro"}
 
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_KEYS_URL = "https://appleid.apple.com/auth/keys"
+DEFAULT_APPLE_BUNDLE_IDS = [
+    "com.docya.pro",
+    "com.docya.paciente",
+]
 APPLE_BUNDLE_IDS = list(
     dict.fromkeys(
-        ["com.docya.pro"]
+        DEFAULT_APPLE_BUNDLE_IDS
+        + [
+            os.getenv("APPLE_PRO_BUNDLE_ID", "").strip(),
+            os.getenv("APPLE_PATIENT_BUNDLE_ID", "").strip(),
+        ]
         + [s.strip() for s in os.getenv("APPLE_BUNDLE_IDS", "").split(",") if s.strip()]
     )
 )
+APPLE_BUNDLE_IDS = [bundle_id for bundle_id in APPLE_BUNDLE_IDS if bundle_id]
 
 
 def _verify_google_token_payload(raw_id_token: str):
