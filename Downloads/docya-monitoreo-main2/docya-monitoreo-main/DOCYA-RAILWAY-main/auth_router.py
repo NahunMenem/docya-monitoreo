@@ -155,6 +155,16 @@ def _verify_apple_token(identity_token: str) -> dict:
         raise HTTPException(status_code=401, detail=f"Error verificando token Apple: {exc}")
 
 
+def _ensure_user_apple_columns(db):
+    """Agrega la columna apple_id a users si no existe."""
+    cur = db.cursor()
+    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS apple_id TEXT")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_apple_id_unique ON users (apple_id) WHERE apple_id IS NOT NULL"
+    )
+    db.commit()
+
+
 def _ensure_medico_apple_columns(db):
     """Agrega la columna apple_id a medicos si no existe."""
     cur = db.cursor()
@@ -1088,6 +1098,100 @@ class AppleAuthMedicoIn(BaseModel):
     identity_token: str
     full_name: str | None = None
     email: str | None = None
+
+
+class AppleAuthIn(BaseModel):
+    identity_token: str
+    full_name: str | None = None
+    email: str | None = None
+
+
+@router.post("/auth/apple")
+def auth_apple(data: AppleAuthIn, db=Depends(get_db)):
+    """Login/registro con Apple ID para pacientes."""
+    _ensure_user_profile_columns(db)
+    _ensure_user_apple_columns(db)
+    try:
+        payload = _verify_apple_token(data.identity_token)
+
+        apple_sub = (payload.get("sub") or "").strip()
+        email_token = (payload.get("email") or "").lower().strip()
+        email = email_token or (data.email or "").lower().strip()
+        full_name = (data.full_name or "").strip() or "Usuario DocYa"
+
+        if not apple_sub:
+            raise HTTPException(status_code=400, detail="Apple no devolvió identidad suficiente")
+
+        cur = db.cursor(cursor_factory=RealDictCursor)
+        query_args = (apple_sub,)
+        where_clause = "apple_id = %s"
+        if email:
+            where_clause += " OR lower(email) = %s"
+            query_args = (apple_sub, email)
+
+        cur.execute(
+            f"""
+            SELECT id, full_name, email, role, validado, perfil_completo, foto_url
+            FROM users
+            WHERE {where_clause}
+            LIMIT 1
+            """,
+            query_args,
+        )
+        user = cur.fetchone()
+        created_new_user = False
+
+        if user:
+            cur.execute(
+                """
+                UPDATE users
+                SET apple_id = %s,
+                    email = CASE WHEN (email IS NULL OR email = '') AND %s != '' THEN %s ELSE email END,
+                    full_name = COALESCE(NULLIF(full_name, ''), %s)
+                WHERE id = %s
+                RETURNING id, full_name, email, role, validado, perfil_completo, foto_url
+                """,
+                (apple_sub, email, email, full_name, user["id"]),
+            )
+            user = cur.fetchone()
+        else:
+            cur.execute(
+                """
+                INSERT INTO users (
+                    email, full_name, apple_id, validado, role,
+                    acepta_terminos, perfil_completo
+                )
+                VALUES (%s, %s, %s, TRUE, 'patient', FALSE, FALSE)
+                RETURNING id, full_name, email, role, validado, perfil_completo, foto_url
+                """,
+                (email, full_name, apple_sub),
+            )
+            user = cur.fetchone()
+            created_new_user = True
+
+        db.commit()
+
+        token = create_access_token(
+            {"sub": str(user["id"]), "email": user["email"], "role": user["role"]}
+        )
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user["id"]),
+                "full_name": user["full_name"],
+                "email": user["email"],
+                "role": user["role"],
+                "validado": bool(user["validado"]),
+                "perfil_completo": bool(user["perfil_completo"]),
+                "foto_url": user.get("foto_url"),
+            },
+            "perfil_completo": bool(user["perfil_completo"]),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Error en auth Apple paciente: {exc}")
 
 
 @router.post("/auth/apple_medico")
