@@ -4,8 +4,8 @@ import { useEffect, useState } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   Link2, Users, DollarSign, Copy, Check, ToggleLeft, ToggleRight,
-  X, ExternalLink, CreditCard, Clock, CheckCircle2, AlertCircle,
-  ChevronRight,
+  X, ExternalLink, CreditCard, Clock, CheckCircle2,
+  ChevronRight, Pencil,
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE!;
@@ -285,7 +285,15 @@ function TabPagos({ showToast }: { showToast: (msg: string, ok?: boolean) => voi
   const totalPagado    = groups.reduce((s, g) => s + g.monto_pagado, 0);
 
   const toggleExpand = (id: string) =>
-    setExpanded((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+    setExpanded((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) {
+        n.delete(id);
+      } else {
+        n.add(id);
+      }
+      return n;
+    });
 
   return (
     <div className="space-y-6">
@@ -464,6 +472,9 @@ export default function ReferidosPage() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Referente | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
+  const [editingCodigo, setEditingCodigo] = useState<Referente | null>(null);
+  const [nuevoCodigo, setNuevoCodigo] = useState("");
+  const [savingCodigo, setSavingCodigo] = useState(false);
 
   function showToast(msg: string, ok = true) {
     setToast({ msg, ok });
@@ -480,6 +491,28 @@ export default function ReferidosPage() {
       showToast("Error al cargar referentes", false);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function guardarCodigo() {
+    if (!editingCodigo || !nuevoCodigo.trim()) return;
+    setSavingCodigo(true);
+    try {
+      const res = await fetch(`${API}/referidos/admin/referentes/${editingCodigo.id}/codigo`, {
+        method: "PATCH",
+        headers: { ...adminHeaders(), "Content-Type": "application/json" },
+        body: JSON.stringify({ codigo_referido: nuevoCodigo.trim().toUpperCase() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.detail || "Error al cambiar código", false); return; }
+      showToast("Código actualizado correctamente");
+      setEditingCodigo(null);
+      setNuevoCodigo("");
+      fetchReferentes();
+    } catch {
+      showToast("Error de conexión", false);
+    } finally {
+      setSavingCodigo(false);
     }
   }
 
@@ -592,6 +625,14 @@ export default function ReferidosPage() {
                               <div className="flex items-center gap-1 mb-1">
                                 <span className="font-mono text-xs font-semibold" style={{ color: "var(--brand-primary)" }}>{r.codigo_referido}</span>
                                 <CopyButton text={r.codigo_referido} />
+                                <button
+                                  onClick={() => { setEditingCodigo(r); setNuevoCodigo(r.codigo_referido); }}
+                                  className="p-1 rounded hover:bg-white/10 transition-colors"
+                                  title="Cambiar código"
+                                  style={{ color: "var(--text-muted)" }}
+                                >
+                                  <Pencil size={11} />
+                                </button>
                               </div>
                               <div className="flex items-center gap-1">
                                 <span className="text-xs truncate max-w-[160px]" style={{ color: "var(--text-muted)" }}>{r.link_referido}</span>
@@ -640,6 +681,55 @@ export default function ReferidosPage() {
       </main>
 
       {selected && <ReferidosModal referente={selected} onClose={() => setSelected(null)} />}
+
+      {/* Modal cambiar código */}
+      {editingCodigo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-base font-bold" style={{ color: "var(--text-primary)" }}>
+                Cambiar código de invitación
+              </h3>
+              <button onClick={() => { setEditingCodigo(null); setNuevoCodigo(""); }}
+                className="p-1 rounded hover:bg-white/10 transition-colors" style={{ color: "var(--text-muted)" }}>
+                <X size={18} />
+              </button>
+            </div>
+            <p className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Referente</p>
+            <p className="mb-4 text-sm font-semibold" style={{ color: "var(--text-primary)" }}>{editingCodigo.full_name}</p>
+            <p className="mb-1 text-xs" style={{ color: "var(--text-muted)" }}>Código actual</p>
+            <p className="mb-4 font-mono text-sm font-bold" style={{ color: "var(--brand-primary)" }}>{editingCodigo.codigo_referido}</p>
+            <label className="mb-1 block text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
+              Nuevo código
+            </label>
+            <input
+              value={nuevoCodigo}
+              onChange={(e) => setNuevoCodigo(e.target.value.toUpperCase())}
+              onKeyDown={(e) => { if (e.key === "Enter") guardarCodigo(); }}
+              placeholder="Ej: JUAN2024"
+              maxLength={20}
+              className="mb-2 w-full rounded-xl px-3 py-2 font-mono text-sm uppercase outline-none"
+              style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
+            />
+            <p className="mb-5 text-xs" style={{ color: "var(--text-muted)" }}>
+              El link y QR se actualizan automáticamente.<br />
+              Solo letras, números, guiones y guión bajo.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => { setEditingCodigo(null); setNuevoCodigo(""); }}
+                className="flex-1 rounded-xl py-2 text-sm font-medium transition hover:opacity-80"
+                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}>
+                Cancelar
+              </button>
+              <button onClick={guardarCodigo} disabled={savingCodigo || !nuevoCodigo.trim()}
+                className="flex-1 rounded-xl py-2 text-sm font-bold transition hover:opacity-90 disabled:opacity-40"
+                style={{ background: "var(--brand-primary)", color: "#fff" }}>
+                {savingCodigo ? "Guardando…" : "Guardar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {toast && (
         <div className="fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg text-sm font-medium shadow-lg"
