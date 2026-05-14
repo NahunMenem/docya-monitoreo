@@ -4762,6 +4762,34 @@ def medico_llego(consulta_id: int, data: MedicoAccion, db=Depends(get_db)):
 from datetime import datetime, timedelta
 from fastapi import HTTPException
 
+
+def _get_precio_consulta(cur, tipo: str, es_nocturno: bool) -> int:
+    """Precio de consulta desde tarifas_consulta (DB) con fallback a hardcode."""
+    forced = get_forced_consulta_price()
+    if forced is not None:
+        return forced
+
+    if tipo == "medico":
+        tarifa_key = "nocturna" if es_nocturno else "diurna"
+        fallback = 40000 if es_nocturno else 30000
+    else:
+        tarifa_key = "nocturna_enfermero" if es_nocturno else "diurna_enfermero"
+        fallback = 30000 if es_nocturno else 20000
+
+    try:
+        cur.execute(
+            "SELECT monto FROM tarifas_consulta WHERE tipo = %s AND activa = TRUE LIMIT 1",
+            (tarifa_key,),
+        )
+        row = cur.fetchone()
+        if row and row[0]:
+            return int(row[0])
+    except Exception:
+        pass
+
+    return fallback
+
+
 def registrar_pago_interno(consulta_id, medico_id, paciente_uuid, metodo_pago, db):
     cur = db.cursor()
 
@@ -4842,12 +4870,9 @@ def finalizar_consulta(consulta_id: int, db=Depends(get_db)):
     es_nocturno = hora >= 22 or hora < 6
 
     # ============================================================
-    # 💵 TARIFA SEGÚN TIPO + HORARIO
+    # 💵 TARIFA SEGÚN TIPO + HORARIO (desde DB, fallback a hardcode)
     # ============================================================
-    if tipo == "medico":
-        precio = 40000 if es_nocturno else 30000
-    else:  # enfermero
-        precio = 30000 if es_nocturno else 20000
+    precio = _get_precio_consulta(cur, tipo, es_nocturno)
 
     # ============================================================
     # 🔹 Finalizar consulta
@@ -9164,13 +9189,10 @@ def registrar_pago(consulta_id: int, data: PagoConsultaIn, db=Depends(get_db)):
     ahora = now_argentina().time()
     es_nocturna = (ahora >= time(22, 0)) or (ahora < time(6, 0))
 
-    # 4️⃣ Asignar tarifa según tipo y horario
-    if tipo == "medico":
-        monto_total = 40000 if es_nocturna else 30000
-    elif tipo == "enfermero":
-        monto_total = 30000 if es_nocturna else 20000
-    else:
+    # 4️⃣ Asignar tarifa según tipo y horario (desde DB, fallback a hardcode)
+    if tipo not in ("medico", "enfermero"):
         raise HTTPException(status_code=400, detail="Tipo de profesional inválido")
+    monto_total = _get_precio_consulta(cur, tipo, es_nocturna)
 
     # 5️⃣ Calcular según método de pago
     # Comisión estándar DocYa = 20%

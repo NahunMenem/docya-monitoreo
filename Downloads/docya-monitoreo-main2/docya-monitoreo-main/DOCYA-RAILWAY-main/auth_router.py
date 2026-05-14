@@ -1715,72 +1715,81 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
     inicio_semana = start_of_week_argentina()
     fin_semana = inicio_semana + timedelta(days=6)
 
+    # Lee los pagos reales de la semana con canal y horario
     cur.execute(
         f"""
-        SELECT id, fin_atencion, metodo_pago
-        FROM consultas
-        WHERE medico_id = %s
-        AND estado = 'finalizada'
-        AND DATE_TRUNC('week', fin_atencion) = {CURRENT_ARGENTINA_WEEK_SQL}
+        SELECT
+            COALESCE(c.canal_atencion, 'domicilio') AS canal,
+            COALESCE(pc.metodo_pago, 'efectivo')    AS metodo_pago,
+            COALESCE(pc.monto_total, 0)             AS monto_total,
+            COALESCE(pc.medico_neto, 0)             AS medico_neto,
+            c.fin_atencion
+        FROM pagos_consulta pc
+        JOIN consultas c ON c.id = pc.consulta_id
+        WHERE pc.medico_id = %s
+        AND DATE_TRUNC('week', pc.fecha) = {CURRENT_ARGENTINA_WEEK_SQL}
         """,
         (medico_id,),
     )
-    consultas_finalizadas = cur.fetchall()
+    pagos = cur.fetchall()
 
-    consultas_diurnas = 0
-    consultas_nocturnas = 0
-    ganancias_diurnas = 0
-    ganancias_nocturnas = 0
-    consultas_diurnas_tarjeta = 0
-    consultas_nocturnas_tarjeta = 0
-    consultas_diurnas_efectivo = 0
-    consultas_nocturnas_efectivo = 0
-    tarifa_dia = 30000 if tipo == "medico" else 20000
-    tarifa_noche = 40000 if tipo == "medico" else 30000
-    metodo_contador = {}
+    consultas_diurnas = consultas_nocturnas = 0
+    ganancias_diurnas = ganancias_nocturnas = 0
+    consultas_diurnas_tarjeta = consultas_nocturnas_tarjeta = 0
+    consultas_diurnas_efectivo = consultas_nocturnas_efectivo = 0
+    consultas_domicilio = consultas_teleconsulta = 0
+    ganancias_domicilio = ganancias_teleconsulta = 0
+    metodo_contador: dict = {}
+    detalle_pagos: dict = {}
 
-    for _, fin_atencion, metodo_pago in consultas_finalizadas:
-        hora = fin_atencion.time()
-        metodo = (metodo_pago or "efectivo").lower().strip()
+    for canal, metodo, monto_total, medico_neto, fin_atencion in pagos:
+        monto = int(monto_total)
+        neto = int(medico_neto)
         metodo_contador[metodo] = metodo_contador.get(metodo, 0) + 1
-        es_nocturna = (hora >= time(22, 0)) or (hora < time(6, 0))
+
+        # Canal
+        if canal == "teleconsulta":
+            consultas_teleconsulta += 1
+            ganancias_teleconsulta += monto
+        else:
+            consultas_domicilio += 1
+            ganancias_domicilio += monto
+
+        # Horario
+        es_nocturna = False
+        if fin_atencion:
+            hora = fin_atencion.time()
+            es_nocturna = (hora >= time(22, 0)) or (hora < time(6, 0))
+
         if es_nocturna:
             consultas_nocturnas += 1
-            ganancias_nocturnas += tarifa_noche
+            ganancias_nocturnas += monto
             if metodo == "tarjeta":
                 consultas_nocturnas_tarjeta += 1
             else:
                 consultas_nocturnas_efectivo += 1
         else:
             consultas_diurnas += 1
-            ganancias_diurnas += tarifa_dia
+            ganancias_diurnas += monto
             if metodo == "tarjeta":
                 consultas_diurnas_tarjeta += 1
             else:
                 consultas_diurnas_efectivo += 1
 
-    ganancias_total = ganancias_diurnas + ganancias_nocturnas
-    consultas_total = consultas_diurnas + consultas_nocturnas
-    metodo_frecuente = max(metodo_contador, key=metodo_contador.get) if metodo_contador else None
+        # detalle_pagos con medico_neto real
+        if metodo not in detalle_pagos:
+            detalle_pagos[metodo] = {"cantidad": 0, "monto": 0.0}
+        detalle_pagos[metodo]["cantidad"] += 1
+        detalle_pagos[metodo]["monto"] += neto
 
-    cur.execute(
-        f"""
-        SELECT COALESCE(metodo_pago, 'efectivo') AS metodo_pago,
-               COUNT(*) AS cantidad,
-               COALESCE(SUM(medico_neto), 0) AS total
-        FROM pagos_consulta
-        WHERE medico_id = %s
-        AND DATE_TRUNC('week', fecha) = {CURRENT_ARGENTINA_WEEK_SQL}
-        GROUP BY metodo_pago
-        """,
-        (medico_id,),
-    )
-    rows = cur.fetchall()
-    detalle_pagos = {row[0]: {"cantidad": int(row[1]), "monto": float(row[2])} for row in rows}
+    consultas_total = consultas_domicilio + consultas_teleconsulta
+    ganancias_total = ganancias_domicilio + ganancias_teleconsulta
+    metodo_frecuente = max(metodo_contador, key=metodo_contador.get) if metodo_contador else None
 
     return {
         "tipo": tipo,
         "periodo": f"{inicio_semana} → {fin_semana}",
+        # Campos existentes — sin cambios para no romper la app
         "consultas": consultas_total,
         "ganancias": ganancias_total,
         "consultas_diurnas": consultas_diurnas,
@@ -1793,6 +1802,11 @@ def medico_stats(medico_id: int, db=Depends(get_db)):
         "consultas_nocturnas_efectivo": consultas_nocturnas_efectivo,
         "metodo_frecuente": metodo_frecuente,
         "detalle_pagos": detalle_pagos,
+        # Nuevos campos — desglose domicilio vs teleconsulta
+        "consultas_domicilio": consultas_domicilio,
+        "consultas_teleconsulta": consultas_teleconsulta,
+        "ganancias_domicilio": ganancias_domicilio,
+        "ganancias_teleconsulta": ganancias_teleconsulta,
     }
 
 
