@@ -9236,6 +9236,8 @@ def registrar_pago(consulta_id: int, data: PagoConsultaIn, db=Depends(get_db)):
 @app.get("/admin/liquidaciones/resumen")
 def resumen_liquidaciones(db=Depends(get_db)):
     """Resumen de saldos y consultas por profesional para el panel de liquidaciones."""
+    return _resumen_liquidaciones_seguro(db)
+
     cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         SELECT
@@ -9309,29 +9311,38 @@ def resumen_liquidaciones(db=Depends(get_db)):
 
         LEFT JOIN (
             SELECT
-                p.medico_id,
-                COUNT(*)              AS cantidad,
-                SUM(p.medico_neto)    AS neto,
-                SUM(p.docya_comision) AS comision
-            FROM pagos_consulta p
-            JOIN consultas c ON c.id = p.consulta_id
-            WHERE c.canal_atencion = 'teleconsulta'
-            UNION ALL
-            -- Teleconsultas sin registro en pagos_consulta (captura MP directa)
-            SELECT
-                c.medico_id,
-                COUNT(*)  AS cantidad,
-                0         AS neto,
-                0         AS comision
-            FROM consultas c
-            WHERE c.tipo = 'teleconsulta'
-              AND c.estado = 'finalizada'
-              AND c.medico_id IS NOT NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM pagos_consulta p2
-                WHERE p2.consulta_id = c.id
-              )
-            GROUP BY c.medico_id
+                tele.medico_id,
+                SUM(tele.cantidad) AS cantidad,
+                SUM(tele.neto) AS neto,
+                SUM(tele.comision) AS comision
+            FROM (
+                SELECT
+                    p.medico_id,
+                    COUNT(*)              AS cantidad,
+                    SUM(p.medico_neto)    AS neto,
+                    SUM(p.docya_comision) AS comision
+                FROM pagos_consulta p
+                JOIN consultas c ON c.id = p.consulta_id
+                WHERE c.canal_atencion = 'teleconsulta'
+                GROUP BY p.medico_id
+                UNION ALL
+                -- Teleconsultas sin registro en pagos_consulta (captura MP directa)
+                SELECT
+                    c.medico_id,
+                    COUNT(*)  AS cantidad,
+                    0         AS neto,
+                    0         AS comision
+                FROM consultas c
+                WHERE c.tipo = 'teleconsulta'
+                  AND c.estado = 'finalizada'
+                  AND c.medico_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM pagos_consulta p2
+                    WHERE p2.consulta_id = c.id
+                  )
+                GROUP BY c.medico_id
+            ) tele
+            GROUP BY tele.medico_id
         ) tel ON tel.medico_id = m.id
 
         LEFT JOIN (
@@ -9354,6 +9365,237 @@ def resumen_liquidaciones(db=Depends(get_db)):
     rows = cur.fetchall()
     cur.close()
     return [dict(r) for r in rows]
+
+
+def _resumen_liquidaciones_seguro(db):
+    cur = db.cursor(cursor_factory=RealDictCursor)
+    try:
+        def table_exists(table_name: str) -> bool:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name = %s
+                ) AS existe
+            """, (table_name,))
+            return bool(cur.fetchone()["existe"])
+
+        def column_exists(table_name: str, column_name: str) -> bool:
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = %s
+                      AND column_name = %s
+                ) AS existe
+            """, (table_name, column_name))
+            return bool(cur.fetchone()["existe"])
+
+        def safe_section(label: str, callback):
+            nonlocal cur
+            try:
+                callback()
+            except Exception as exc:
+                print(f"liquidaciones: se omite {label}: {exc}")
+                try:
+                    db.rollback()
+                finally:
+                    cur.close()
+                    cur = db.cursor(cursor_factory=RealDictCursor)
+
+        has_saldo = table_exists("saldo_medico")
+        has_alias = column_exists("medicos", "alias_cbu")
+        has_validado = column_exists("medicos", "validado")
+        has_consultas = table_exists("consultas")
+        has_pagos = table_exists("pagos_consulta")
+        has_liquidaciones = table_exists("liquidaciones_medico")
+        has_canal = has_consultas and column_exists("consultas", "canal_atencion")
+
+        alias_expr = "COALESCE(m.alias_cbu, '')" if has_alias else "''"
+        saldo_expr = "COALESCE(s.saldo, 0)" if has_saldo else "0"
+        saldo_join = "LEFT JOIN saldo_medico s ON s.medico_id = m.id" if has_saldo else ""
+        validado_where = "WHERE m.validado = TRUE" if has_validado else ""
+
+        cur.execute(f"""
+            SELECT
+                m.id,
+                m.full_name AS nombre,
+                COALESCE(m.tipo, 'medico') AS tipo,
+                {alias_expr} AS alias_cbu,
+                {saldo_expr} AS saldo
+            FROM medicos m
+            {saldo_join}
+            {validado_where}
+        """)
+
+        profesionales = {}
+        for row in cur.fetchall():
+            item = dict(row)
+            item.update({
+                "domicilio_cantidad": 0,
+                "domicilio_neto": 0,
+                "domicilio_comision": 0,
+                "domicilio_efectivo_cantidad": 0,
+                "domicilio_efectivo_bruto": 0,
+                "domicilio_efectivo_comision": 0,
+                "domicilio_app_cantidad": 0,
+                "domicilio_app_bruto": 0,
+                "domicilio_app_neto": 0,
+                "domicilio_app_comision": 0,
+                "tele_cantidad": 0,
+                "tele_neto": 0,
+                "tele_comision": 0,
+                "ultima_liquidacion": None,
+                "ultimo_monto": None,
+            })
+            profesionales[item["id"]] = item
+
+        if has_pagos:
+            canal_filtro = "COALESCE(c.canal_atencion, 'domicilio') != 'teleconsulta'" if has_canal else "COALESCE(c.tipo, '') != 'teleconsulta'"
+
+            def cargar_domicilio():
+                cur.execute(f"""
+                    SELECT
+                        p.medico_id,
+                        COUNT(*) AS cantidad,
+                        COALESCE(SUM(p.medico_neto), 0) AS neto,
+                        COALESCE(SUM(p.docya_comision), 0) AS comision,
+                        COUNT(*) FILTER (
+                            WHERE LOWER(COALESCE(p.metodo_pago, 'efectivo')) = 'efectivo'
+                        ) AS efectivo_cantidad,
+                        COALESCE(SUM(CASE
+                            WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) = 'efectivo'
+                            THEN p.monto_total ELSE 0 END), 0
+                        ) AS efectivo_bruto,
+                        COALESCE(SUM(CASE
+                            WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) = 'efectivo'
+                            THEN p.docya_comision ELSE 0 END), 0
+                        ) AS efectivo_comision,
+                        COUNT(*) FILTER (
+                            WHERE LOWER(COALESCE(p.metodo_pago, 'efectivo')) <> 'efectivo'
+                        ) AS app_cantidad,
+                        COALESCE(SUM(CASE
+                            WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) <> 'efectivo'
+                            THEN p.monto_total ELSE 0 END), 0
+                        ) AS app_bruto,
+                        COALESCE(SUM(CASE
+                            WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) <> 'efectivo'
+                            THEN p.medico_neto ELSE 0 END), 0
+                        ) AS app_neto,
+                        COALESCE(SUM(CASE
+                            WHEN LOWER(COALESCE(p.metodo_pago, 'efectivo')) <> 'efectivo'
+                            THEN p.docya_comision ELSE 0 END), 0
+                        ) AS app_comision
+                    FROM pagos_consulta p
+                    LEFT JOIN consultas c ON c.id = p.consulta_id
+                    WHERE {canal_filtro}
+                    GROUP BY p.medico_id
+                """)
+                for row in cur.fetchall():
+                    item = profesionales.get(row["medico_id"])
+                    if not item:
+                        continue
+                    item.update({
+                        "domicilio_cantidad": int(row["cantidad"] or 0),
+                        "domicilio_neto": float(row["neto"] or 0),
+                        "domicilio_comision": float(row["comision"] or 0),
+                        "domicilio_efectivo_cantidad": int(row["efectivo_cantidad"] or 0),
+                        "domicilio_efectivo_bruto": float(row["efectivo_bruto"] or 0),
+                        "domicilio_efectivo_comision": float(row["efectivo_comision"] or 0),
+                        "domicilio_app_cantidad": int(row["app_cantidad"] or 0),
+                        "domicilio_app_bruto": float(row["app_bruto"] or 0),
+                        "domicilio_app_neto": float(row["app_neto"] or 0),
+                        "domicilio_app_comision": float(row["app_comision"] or 0),
+                    })
+
+            safe_section("pagos domicilio", cargar_domicilio)
+
+        if has_pagos and has_consultas:
+            tele_filtro = "c.canal_atencion = 'teleconsulta'" if has_canal else "c.tipo = 'teleconsulta'"
+
+            def cargar_tele_pagos():
+                cur.execute(f"""
+                    SELECT
+                        p.medico_id,
+                        COUNT(*) AS cantidad,
+                        COALESCE(SUM(p.medico_neto), 0) AS neto,
+                        COALESCE(SUM(p.docya_comision), 0) AS comision
+                    FROM pagos_consulta p
+                    JOIN consultas c ON c.id = p.consulta_id
+                    WHERE {tele_filtro}
+                    GROUP BY p.medico_id
+                """)
+                for row in cur.fetchall():
+                    item = profesionales.get(row["medico_id"])
+                    if item:
+                        item["tele_cantidad"] += int(row["cantidad"] or 0)
+                        item["tele_neto"] += float(row["neto"] or 0)
+                        item["tele_comision"] += float(row["comision"] or 0)
+
+            safe_section("pagos teleconsulta", cargar_tele_pagos)
+
+        if has_consultas:
+            def cargar_tele_sin_pago():
+                not_exists = ""
+                if has_pagos:
+                    not_exists = """
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pagos_consulta p2
+                        WHERE p2.consulta_id = c.id
+                      )
+                    """
+                cur.execute(f"""
+                    SELECT
+                        c.medico_id,
+                        COUNT(*) AS cantidad
+                    FROM consultas c
+                    WHERE c.tipo = 'teleconsulta'
+                      AND c.estado = 'finalizada'
+                      AND c.medico_id IS NOT NULL
+                      {not_exists}
+                    GROUP BY c.medico_id
+                """)
+                for row in cur.fetchall():
+                    item = profesionales.get(row["medico_id"])
+                    if item:
+                        item["tele_cantidad"] += int(row["cantidad"] or 0)
+
+            safe_section("teleconsultas sin pago", cargar_tele_sin_pago)
+
+        if has_liquidaciones:
+            def cargar_ultimas_liquidaciones():
+                cur.execute("""
+                    SELECT DISTINCT ON (medico_id)
+                        medico_id,
+                        fecha AS ultima_liquidacion,
+                        monto_pagado AS ultimo_monto
+                    FROM liquidaciones_medico
+                    ORDER BY medico_id, fecha DESC
+                """)
+                for row in cur.fetchall():
+                    item = profesionales.get(row["medico_id"])
+                    if item:
+                        item["ultima_liquidacion"] = row["ultima_liquidacion"]
+                        item["ultimo_monto"] = float(row["ultimo_monto"] or 0)
+
+            safe_section("ultimas liquidaciones", cargar_ultimas_liquidaciones)
+
+        rows = [
+            item for item in profesionales.values()
+            if float(item["saldo"] or 0) != 0
+            or int(item["domicilio_cantidad"] or 0) > 0
+            or int(item["tele_cantidad"] or 0) > 0
+        ]
+        rows.sort(key=lambda r: (-float(r["saldo"] or 0), r["nombre"] or ""))
+        return rows
+    except Exception as exc:
+        print(f"liquidaciones: error fatal en resumen: {exc}")
+        db.rollback()
+        return []
+    finally:
+        cur.close()
 
 
 @app.get("/admin/liquidaciones/historial/{medico_id}")
@@ -9391,8 +9633,7 @@ def obtener_saldo(medico_id: int, db=Depends(get_db)):
 
 #📋 3️⃣ Listar pagos del médico
 @app.get("/medicos/{medico_id}/pagos")
-def listar_pagos_medico(medico_id: int):
-    db = get_db()
+def listar_pagos_medico(medico_id: int, db=Depends(get_db)):
     cur = db.cursor()
     cur.execute("""
         SELECT id, consulta_id, metodo_pago, monto_total, medico_neto, docya_comision, fecha
@@ -9401,7 +9642,7 @@ def listar_pagos_medico(medico_id: int):
         ORDER BY fecha DESC
     """, (medico_id,))
     rows = cur.fetchall()
-    db.close()
+    cur.close()
 
     return [
         {
@@ -9420,25 +9661,46 @@ class LiquidacionIn(BaseModel):
     periodo_fin: date
     monto_pagado: float
 
-@app.post("/medicos/{medico_id}/liquidar")
-def liquidar_medico(medico_id: int, data: LiquidacionIn):
-    db = get_db()
+def _registrar_liquidacion_medico(medico_id: int, data: LiquidacionIn, db):
     cur = db.cursor()
+    try:
+        cur.execute("SELECT id FROM medicos WHERE id = %s", (medico_id,))
+        if not cur.fetchone():
+            raise HTTPException(status_code=404, detail="Profesional no encontrado")
 
-    # Insertar la liquidación
-    cur.execute("""
-        INSERT INTO liquidaciones_medico (medico_id, periodo_inicio, periodo_fin, monto_pagado)
-        VALUES (%s, %s, %s, %s)
-    """, (medico_id, data.periodo_inicio, data.periodo_fin, data.monto_pagado))
+        cur.execute("SELECT saldo FROM saldo_medico WHERE medico_id = %s", (medico_id,))
+        if not cur.fetchone():
+            cur.execute(
+                "INSERT INTO saldo_medico (medico_id, saldo) VALUES (%s, 0)",
+                (medico_id,),
+            )
 
-    # Actualizar saldo
-    cur.execute("UPDATE saldo_medico SET saldo = saldo - %s WHERE medico_id = %s",
-                (data.monto_pagado, medico_id))
+        cur.execute("""
+            INSERT INTO liquidaciones_medico (medico_id, periodo_inicio, periodo_fin, monto_pagado)
+            VALUES (%s, %s, %s, %s)
+        """, (medico_id, data.periodo_inicio, data.periodo_fin, data.monto_pagado))
 
-    db.commit()
-    db.close()
+        cur.execute("""
+            UPDATE saldo_medico
+            SET saldo = saldo - %s
+            WHERE medico_id = %s
+        """, (data.monto_pagado, medico_id))
 
-    return {"ok": True, "mensaje": f"Liquidación registrada por ${data.monto_pagado}"}
+        db.commit()
+        return {"ok": True, "mensaje": f"Liquidacion registrada por ${data.monto_pagado}"}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        print(f"Error liquidando medico {medico_id}: {exc}")
+        raise HTTPException(status_code=500, detail="No se pudo registrar la liquidacion")
+    finally:
+        cur.close()
+
+@app.post("/medicos/{medico_id}/liquidar")
+def liquidar_medico(medico_id: int, data: LiquidacionIn, db=Depends(get_db)):
+    return _registrar_liquidacion_medico(medico_id, data, db)
 
 templates = Jinja2Templates(directory="templates")
 
