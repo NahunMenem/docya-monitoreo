@@ -4148,13 +4148,17 @@ async def solicitar_consulta_web(
 
 
 
-#historial consultas medico 
+#historial consultas medico
 @app.get("/consultas/historial_medico/{medico_id}")
 def historial_medico(medico_id: int, db=Depends(get_db)):
     cur = db.cursor()
     cur.execute("""
         SELECT c.id, c.estado, c.motivo, c.direccion, c.creado_en,
-               COALESCE(u.full_name, 'Paciente') as paciente_nombre
+               COALESCE(u.full_name, 'Paciente') as paciente_nombre,
+               COALESCE(c.canal_atencion, 'domicilio') as canal_atencion,
+               c.precio_final,
+               c.fin_atencion,
+               c.fin_video_at
         FROM consultas c
         LEFT JOIN users u ON c.paciente_uuid = u.id
         WHERE c.medico_id = %s
@@ -4168,8 +4172,11 @@ def historial_medico(medico_id: int, db=Depends(get_db)):
             "estado": r[1],
             "motivo": r[2],
             "direccion": r[3],
-            "creado_en": format_datetime_arg(r[4]),   # 👈
-            "paciente_nombre": r[5]
+            "creado_en": format_datetime_arg(r[4]),
+            "paciente_nombre": r[5],
+            "canal_atencion": r[6],
+            "precio_final": r[7],
+            "fin_atencion": format_datetime_arg(r[8]) if r[8] else format_datetime_arg(r[9]),
         }
         for r in rows
     ]
