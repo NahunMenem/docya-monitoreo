@@ -8,16 +8,22 @@ import {
   ArrowUpFromLine,
   BadgeCheck,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Home,
+  Moon,
   ReceiptText,
   RefreshCw,
   Search,
+  Sun,
+  Video,
   Wallet,
   X,
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE!;
+const PAGE_SIZE = 10;
 
 type Profesional = {
   id: number;
@@ -35,6 +41,8 @@ type Profesional = {
   domicilio_app_bruto?: number;
   domicilio_app_neto?: number;
   domicilio_app_comision?: number;
+  domicilio_diurna_cantidad?: number;
+  domicilio_nocturna_cantidad?: number;
   tele_cantidad: number;
   tele_neto: number;
   tele_comision: number;
@@ -51,7 +59,22 @@ type Liquidacion = {
 };
 
 type Filtro = "todos" | "pagar" | "cobrar" | "cero";
+type TipoFiltro = "todos" | "medico" | "enfermero";
 type Operacion = "pago_profesional" | "comision_recibida";
+
+function getWeekRange() {
+  const today = new Date();
+  const day = today.getDay();
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+  const monday = new Date(today);
+  monday.setDate(today.getDate() + diffToMonday);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return {
+    desde: monday.toISOString().slice(0, 10),
+    hasta: sunday.toISOString().slice(0, 10),
+  };
+}
 
 function authHeaders() {
   const token =
@@ -65,12 +88,9 @@ function authHeaders() {
 function pesos(n: number) {
   return "$" + Math.round(Math.abs(n)).toLocaleString("es-AR");
 }
-
 function pesosConSigno(n: number) {
-  if (n < 0) return `-${pesos(n)}`;
-  return pesos(n);
+  return n < 0 ? `-${pesos(n)}` : pesos(n);
 }
-
 function fmtDate(s: string | null) {
   if (!s) return "-";
   return new Date(s).toLocaleDateString("es-AR", {
@@ -79,35 +99,18 @@ function fmtDate(s: string | null) {
     year: "numeric",
   });
 }
-
-function todayIso() {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function monthStartIso() {
-  const d = new Date();
-  d.setDate(1);
-  return d.toISOString().slice(0, 10);
-}
-
 function tipoLabel(tipo: string) {
-  return tipo?.toLowerCase() === "enfermero" ? "Enfermero" : "Medico";
+  return tipo?.toLowerCase() === "enfermero" ? "Enfermero" : "Médico";
 }
-
 function consultaLabel(tipo: string, plural = true) {
   return tipo?.toLowerCase() === "enfermero"
-    ? plural
-      ? "servicios"
-      : "servicio"
-    : plural
-      ? "consultas"
-      : "consulta";
+    ? plural ? "servicios" : "servicio"
+    : plural ? "consultas" : "consulta";
 }
 
 function liquidacionDetalle(prof: Profesional) {
   const efectivoBruto = prof.domicilio_efectivo_bruto ?? 0;
-  const efectivoComision =
-    prof.domicilio_efectivo_comision ?? efectivoBruto * 0.2;
+  const efectivoComision = prof.domicilio_efectivo_comision ?? efectivoBruto * 0.2;
   const efectivoNeto = Math.max(efectivoBruto - efectivoComision, 0);
   const appBruto = prof.domicilio_app_bruto ?? 0;
   const appNeto = prof.domicilio_app_neto ?? 0;
@@ -116,35 +119,22 @@ function liquidacionDetalle(prof: Profesional) {
   const teleComision = prof.tele_comision ?? 0;
   const saldoDisponible = Math.max(prof.saldo, 0);
   const saldoRegularizar = Math.max(-prof.saldo, 0);
-  const compensadoORegularizado = Math.max(
-    efectivoComision - saldoRegularizar,
-    0,
-  );
+  const compensadoORegularizado = Math.max(efectivoComision - saldoRegularizar, 0);
   const totalProfesional = efectivoNeto + appNeto + teleNeto;
   const totalComision = efectivoComision + appComision + teleComision;
 
   return {
-    efectivoBruto,
-    efectivoComision,
-    efectivoNeto,
-    appBruto,
-    appNeto,
-    appComision,
-    teleNeto,
-    teleComision,
-    saldoDisponible,
-    saldoRegularizar,
+    efectivoBruto, efectivoComision, efectivoNeto,
+    appBruto, appNeto, appComision,
+    teleNeto, teleComision,
+    saldoDisponible, saldoRegularizar,
     compensadoORegularizado,
-    totalProfesional,
-    totalComision,
+    totalProfesional, totalComision,
   };
 }
 
 function ModalRegistrarMovimiento({
-  prof,
-  operacion,
-  onClose,
-  onDone,
+  prof, operacion, onClose, onDone,
 }: {
   prof: Profesional;
   operacion: Operacion;
@@ -153,15 +143,17 @@ function ModalRegistrarMovimiento({
 }) {
   const isComision = operacion === "comision_recibida";
   const saldoAbs = Math.abs(prof.saldo);
-  const [periodoInicio, setPeriodoInicio] = useState(monthStartIso());
-  const [periodoFin, setPeriodoFin] = useState(todayIso());
+  const [periodoInicio, setPeriodoInicio] = useState(
+    new Date(new Date().setDate(1)).toISOString().slice(0, 10)
+  );
+  const [periodoFin, setPeriodoFin] = useState(
+    new Date().toISOString().slice(0, 10)
+  );
   const [monto, setMonto] = useState(String(Math.round(saldoAbs)));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const title = isComision
-    ? "Marcar regularizacion recibida"
-    : "Registrar pago al profesional";
+  const title = isComision ? "Marcar regularizacion recibida" : "Registrar pago al profesional";
   const description = isComision
     ? "Usa esta accion cuando el profesional ya transfirio a DocYa el saldo pendiente de regularizar."
     : "Usa esta accion cuando DocYa ya le transfirio al profesional lo disponible para cobrar.";
@@ -176,182 +168,104 @@ function ModalRegistrarMovimiento({
       setError("Completa periodo y monto.");
       return;
     }
-
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${API}/medicos/${prof.id}/liquidar`, {
+      const res = await fetch(`${API}/admin/liquidaciones/registrar`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
+          medico_id: prof.id,
+          monto: signedAmount,
           periodo_inicio: periodoInicio,
           periodo_fin: periodoFin,
-          monto_pagado: signedAmount,
+          operacion,
         }),
       });
       if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        setError(d.detail ?? "No se pudo registrar el movimiento.");
-        return;
+        const body = await res.json().catch(() => ({}));
+        setError(body.detail || "Error al registrar.");
+      } else {
+        onDone();
       }
-      onDone();
+    } catch {
+      setError("Error de conexion.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div
-        className="w-full max-w-lg rounded-2xl p-6 shadow-2xl"
-        style={{
-          background: "var(--card-bg)",
-          border: "1px solid var(--border-subtle)",
-        }}
+        className="w-full max-w-md rounded-2xl p-6"
+        style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
       >
-        <div className="mb-5 flex items-start justify-between gap-4">
-          <div>
-            <div className="mb-3 flex items-center gap-2">
-              <span
-                className="rounded-full px-3 py-1 text-xs font-bold"
-                style={{
-                  background: isComision
-                    ? "rgba(245,158,11,0.14)"
-                    : "rgba(20,184,166,0.14)",
-                  color: isComision ? "#fbbf24" : "var(--brand-primary-light)",
-                }}
-              >
-                {isComision ? "Regularizacion DocYa" : "Pago profesional"}
-              </span>
-            </div>
-            <h2
-              className="text-xl font-bold"
-              style={{ color: "var(--text-primary)" }}
-            >
-              {title}
-            </h2>
-            <p className="mt-1 text-sm" style={{ color: "var(--text-muted)" }}>
-              {prof.nombre} - saldo actual{" "}
-              <b style={{ color: isComision ? "#f87171" : "#2dd4bf" }}>
-                {pesosConSigno(prof.saldo)}
-              </b>
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-2 transition hover:bg-white/5"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <X size={18} />
+        <div className="mb-4 flex items-start justify-between">
+          <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>
+            {title}
+          </h2>
+          <button onClick={onClose} style={{ color: "var(--text-muted)" }}>
+            <X size={20} />
           </button>
         </div>
-
-        <p
-          className="mb-5 rounded-xl px-4 py-3 text-sm leading-relaxed"
-          style={{
-            color: "var(--text-secondary)",
-            background: "var(--input-bg)",
-            border: "1px solid var(--border-subtle)",
-          }}
-        >
+        <p className="mb-5 text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
           {description}
         </p>
-
-        <div className="grid gap-3 sm:grid-cols-2">
-          <label className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Periodo desde
-            </span>
+        <div className="space-y-4">
+          <div>
+            <label className="mb-1 block text-xs font-bold" style={{ color: "var(--text-muted)" }}>
+              Profesional
+            </label>
+            <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+              {prof.nombre}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { label: "Periodo inicio", val: periodoInicio, set: setPeriodoInicio },
+              { label: "Periodo fin", val: periodoFin, set: setPeriodoFin },
+            ].map(({ label, val, set }) => (
+              <div key={label}>
+                <label className="mb-1 block text-xs font-bold" style={{ color: "var(--text-muted)" }}>
+                  {label}
+                </label>
+                <input
+                  type="date"
+                  value={val}
+                  onChange={(e) => set(e.target.value)}
+                  className="w-full rounded-xl px-3 py-2 text-sm outline-none"
+                  style={{
+                    background: "var(--input-bg)",
+                    border: "1px solid var(--border-subtle)",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </div>
+            ))}
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-bold" style={{ color: "var(--text-muted)" }}>
+              Monto ($)
+            </label>
             <input
-              type="date"
-              value={periodoInicio}
-              onChange={(e) => setPeriodoInicio(e.target.value)}
-              className="w-full rounded-lg px-3 py-2 text-sm outline-none"
+              type="number"
+              value={monto}
+              onChange={(e) => setMonto(e.target.value)}
+              className="w-full rounded-xl px-3 py-2 text-sm outline-none"
               style={{
                 background: "var(--input-bg)",
                 border: "1px solid var(--border-subtle)",
                 color: "var(--text-primary)",
               }}
             />
-          </label>
-          <label className="space-y-1">
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              Periodo hasta
-            </span>
-            <input
-              type="date"
-              value={periodoFin}
-              onChange={(e) => setPeriodoFin(e.target.value)}
-              className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-              style={{
-                background: "var(--input-bg)",
-                border: "1px solid var(--border-subtle)",
-                color: "var(--text-primary)",
-              }}
-            />
-          </label>
-        </div>
-
-        <label className="mt-3 block space-y-1">
-          <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-            Monto ({isComision ? "recibido por DocYa" : "pagado"})
-          </span>
-          <input
-            type="number"
-            min={0}
-            value={monto}
-            onChange={(e) => setMonto(e.target.value)}
-            className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-            style={{
-              background: "var(--input-bg)",
-              border: "1px solid var(--border-subtle)",
-              color: "var(--text-primary)",
-            }}
-          />
-        </label>
-
-        <div
-          className="mt-4 rounded-xl px-4 py-3 text-xs"
-          style={{
-            color: "var(--text-muted)",
-            background: isComision
-              ? "rgba(245,158,11,0.08)"
-              : "rgba(20,184,166,0.08)",
-            border: "1px solid var(--border-subtle)",
-          }}
-        >
-          Se registrara en historial como{" "}
-          <b style={{ color: "var(--text-primary)" }}>
-            {pesosConSigno(signedAmount)}
-          </b>
-          . {isComision ? "Esto sube el saldo hacia cero." : "Esto baja el saldo hacia cero."}
-        </div>
-
-        {error && (
-          <p className="mt-3 text-sm font-medium" style={{ color: "#f87171" }}>
-            {error}
-          </p>
-        )}
-
-        <div className="mt-6 flex gap-2">
-          <button
-            onClick={onClose}
-            className="flex-1 rounded-xl px-4 py-2.5 text-sm font-semibold transition hover:bg-white/5"
-            style={{
-              border: "1px solid var(--border-subtle)",
-              color: "var(--text-muted)",
-            }}
-          >
-            Cancelar
-          </button>
+          </div>
+          {error && <p className="text-xs font-bold text-red-400">{error}</p>}
           <button
             onClick={handleSubmit}
             disabled={loading}
-            className="flex-1 rounded-xl px-4 py-2.5 text-sm font-bold transition disabled:opacity-50"
-            style={{
-              background: isComision ? "#f59e0b" : "var(--brand-primary)",
-              color: "#fff",
-            }}
+            className="w-full rounded-xl py-3 text-sm font-black text-white transition hover:opacity-90 disabled:opacity-50"
+            style={{ background: isComision ? "#f59e0b" : "var(--brand-primary)" }}
           >
             {loading ? "Guardando..." : submitLabel}
           </button>
@@ -366,24 +280,27 @@ function ProfesionalCard({
   onRegistrar,
 }: {
   prof: Profesional;
-  onRegistrar: (p: Profesional, op: Operacion) => void;
+  onRegistrar: (prof: Profesional, operacion: Operacion) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [historial, setHistorial] = useState<Liquidacion[]>([]);
   const [loadingH, setLoadingH] = useState(false);
 
+  const detalle = liquidacionDetalle(prof);
   const isCobrarComision = prof.saldo < 0;
   const isPagarProfesional = prof.saldo > 0;
   const isCero = prof.saldo === 0;
-  const detalle = liquidacionDetalle(prof);
+
+  const efectivoCantidad = prof.domicilio_efectivo_cantidad ?? 0;
+  const appCantidad = prof.domicilio_app_cantidad ?? 0;
   const labelPlural = consultaLabel(prof.tipo);
-  const efectivoCantidad =
-    prof.domicilio_efectivo_cantidad ?? (detalle.efectivoBruto > 0 ? prof.domicilio_cantidad : 0);
-  const appCantidad =
-    prof.domicilio_app_cantidad ?? (detalle.appNeto > 0 ? prof.domicilio_cantidad : 0);
+  const esMedico = prof.tipo?.toLowerCase() !== "enfermero";
+
+  const diurnaCantidad = prof.domicilio_diurna_cantidad ?? 0;
+  const nocturnaCantidad = prof.domicilio_nocturna_cantidad ?? 0;
+  const teleCantidad = prof.tele_cantidad ?? 0;
 
   const loadHistorial = async () => {
-    if (historial.length) return;
     setLoadingH(true);
     try {
       const res = await fetch(`${API}/admin/liquidaciones/historial/${prof.id}`, {
@@ -396,54 +313,56 @@ function ProfesionalCard({
   };
 
   const handleExpand = () => {
-    setExpanded((v) => !v);
+    setExpanded((p) => !p);
     if (!expanded) loadHistorial();
   };
 
   return (
     <article
       className="rounded-2xl p-4"
-      style={{
-        background: "var(--card-bg)",
-        border: "1px solid var(--border-subtle)",
-      }}
+      style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
     >
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3
-              className="truncate text-base font-bold"
-              style={{ color: "var(--text-primary)" }}
-            >
+            <h3 className="truncate text-base font-bold" style={{ color: "var(--text-primary)" }}>
               {prof.nombre}
             </h3>
             <span
-              className="rounded-full px-2.5 py-1 text-xs font-bold"
+              className="rounded-full px-2.5 py-1 text-xs font-black"
               style={{
-                background:
-                  prof.tipo === "medico"
-                    ? "rgba(20,184,166,0.13)"
-                    : "rgba(139,92,246,0.13)",
-                color:
-                  prof.tipo === "medico"
-                    ? "var(--brand-primary-light)"
-                    : "#a78bfa",
+                background: esMedico ? "rgba(20,184,166,0.15)" : "rgba(139,92,246,0.15)",
+                color: esMedico ? "var(--brand-primary-light)" : "#a78bfa",
               }}
             >
               {tipoLabel(prof.tipo)}
             </span>
-            {isCobrarComision && (
-              <span className="badge badge-yellow">Debe comision</span>
-            )}
-            {isPagarProfesional && (
-              <span className="badge badge-teal">DocYa debe pagar</span>
-            )}
+            {isCobrarComision && <span className="badge badge-yellow">Debe comision</span>}
+            {isPagarProfesional && <span className="badge badge-teal">DocYa debe pagar</span>}
             {isCero && <span className="badge badge-green">Al dia</span>}
           </div>
           <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>
             ID #{prof.id}
-            {prof.alias_cbu ? ` - Alias/CBU: ${prof.alias_cbu}` : " - Sin alias/CBU cargado"}
+            {prof.alias_cbu ? ` · Alias/CBU: ${prof.alias_cbu}` : " · Sin alias/CBU"}
           </p>
+          <div className="mt-2 flex flex-wrap gap-3 text-xs" style={{ color: "var(--text-muted)" }}>
+            <span className="flex items-center gap-1">
+              <Home size={11} />
+              {prof.domicilio_cantidad} domicilio
+              {diurnaCantidad + nocturnaCantidad > 0 && (
+                <span className="ml-1">
+                  (<Sun size={10} className="inline" /> {diurnaCantidad} ·{" "}
+                  <Moon size={10} className="inline" /> {nocturnaCantidad})
+                </span>
+              )}
+            </span>
+            {teleCantidad > 0 && (
+              <span className="flex items-center gap-1">
+                <Video size={11} />
+                {teleCantidad} teleconsulta{teleCantidad !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:w-[760px]">
@@ -469,7 +388,7 @@ function ProfesionalCard({
           />
           <MiniMetric
             icon={isPagarProfesional ? ArrowUpFromLine : isCobrarComision ? ArrowDownToLine : BadgeCheck}
-            label={isPagarProfesional ? "Disponible para pagar" : isCobrarComision ? "Saldo a regularizar" : "Cuenta al dia"}
+            label={isPagarProfesional ? "Disponible para pagar" : isCobrarComision ? "Saldo a regularizar" : "Al dia"}
             value={pesos(isPagarProfesional ? detalle.saldoDisponible : detalle.saldoRegularizar)}
             detail={isPagarProfesional ? "Transferir al profesional" : isCobrarComision ? "Debe a DocYa" : "Saldo en cero"}
             tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
@@ -484,7 +403,7 @@ function ProfesionalCard({
               style={{ background: "#f59e0b", color: "#fff" }}
             >
               <ArrowDownToLine size={16} />
-              Marcar regularizacion
+              Regularizar
             </button>
           ) : (
             <button
@@ -500,10 +419,7 @@ function ProfesionalCard({
           <button
             onClick={handleExpand}
             className="rounded-xl p-2.5 transition hover:bg-white/5"
-            style={{
-              color: "var(--text-muted)",
-              border: "1px solid var(--border-subtle)",
-            }}
+            style={{ color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
           >
             {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
           </button>
@@ -516,18 +432,18 @@ function ProfesionalCard({
       >
         <InfoLine label="Neto por efectivo" value={pesos(detalle.efectivoNeto)} />
         <InfoLine label="Neto por app" value={pesos(detalle.appNeto)} />
-        <InfoLine label="Compensado/regularizado" value={pesos(detalle.compensadoORegularizado)} />
+        <InfoLine label="Neto teleconsultas" value={pesos(detalle.teleNeto)} />
         <InfoLine
           label="Ultimo movimiento"
           value={
             prof.ultima_liquidacion
-              ? `${fmtDate(prof.ultima_liquidacion)} - ${pesosConSigno(prof.ultimo_monto ?? 0)}`
+              ? `${fmtDate(prof.ultima_liquidacion)} · ${pesosConSigno(prof.ultimo_monto ?? 0)}`
               : "Sin movimientos"
           }
         />
       </div>
 
-      <div className="mt-3 grid gap-3 lg:grid-cols-3">
+      <div className="mt-3 grid gap-3 lg:grid-cols-4">
         <BreakdownPanel
           title="Efectivo"
           subtitle="El profesional ya recibio este dinero del paciente."
@@ -542,6 +458,13 @@ function ProfesionalCard({
           title="Pagos por app"
           subtitle="DocYa recauda y luego transfiere el neto."
           rows={[
+            [`${appCantidad} ${labelPlural}`, ""] as [string, string],
+            ...(diurnaCantidad + nocturnaCantidad > 0
+              ? [
+                  [`☀ Diurnas`, String(diurnaCantidad)] as [string, string],
+                  [`🌙 Nocturnas`, String(nocturnaCantidad)] as [string, string],
+                ]
+              : ([] as [string, string][])),
             ["Pagado por pacientes", pesos(detalle.appBruto)],
             ["Comision DocYa 20%", `-${pesos(detalle.appComision)}`],
             ["Neto a profesional", pesos(detalle.appNeto)],
@@ -549,11 +472,21 @@ function ProfesionalCard({
           tone="blue"
         />
         <BreakdownPanel
+          title="Teleconsultas"
+          subtitle="Consultas por video realizadas."
+          rows={[
+            [`${teleCantidad} teleconsulta${teleCantidad !== 1 ? "s" : ""}`, ""],
+            ["Neto profesional", pesos(detalle.teleNeto)],
+            ["Comision DocYa 20%", detalle.teleComision > 0 ? `-${pesos(detalle.teleComision)}` : "$0"],
+          ]}
+          tone="purple"
+        />
+        <BreakdownPanel
           title="Saldo final"
           subtitle="Resultado despues de compensar movimientos."
           rows={[
             ["Disponible para transferir", pesos(detalle.saldoDisponible)],
-            ["Saldo pendiente de regularizar", pesos(detalle.saldoRegularizar)],
+            ["Pendiente de regularizar", pesos(detalle.saldoRegularizar)],
             ["Total ganado profesional", pesos(detalle.totalProfesional)],
           ]}
           tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
@@ -562,42 +495,27 @@ function ProfesionalCard({
 
       {expanded && (
         <div className="mt-4">
-          <p
-            className="mb-2 text-xs font-bold uppercase tracking-wide"
-            style={{ color: "var(--text-muted)" }}
-          >
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>
             Historial de movimientos
           </p>
           {loadingH ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              Cargando...
-            </p>
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Cargando...</p>
           ) : historial.length === 0 ? (
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              Sin movimientos registrados.
-            </p>
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>Sin movimientos registrados.</p>
           ) : (
             <div className="space-y-2">
               {historial.map((liq) => (
                 <div
                   key={liq.id}
                   className="grid gap-2 rounded-xl px-3 py-2 text-xs md:grid-cols-3"
-                  style={{
-                    background: "var(--input-bg)",
-                    border: "1px solid var(--border-subtle)",
-                  }}
+                  style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)" }}
                 >
                   <span style={{ color: "var(--text-muted)" }}>
-                    {fmtDate(liq.periodo_inicio)} - {fmtDate(liq.periodo_fin)}
+                    {fmtDate(liq.periodo_inicio)} – {fmtDate(liq.periodo_fin)}
                   </span>
                   <span
                     className="font-bold"
-                    style={{
-                      color:
-                        liq.monto_pagado < 0
-                          ? "#fbbf24"
-                          : "var(--brand-primary-light)",
-                    }}
+                    style={{ color: liq.monto_pagado < 0 ? "#fbbf24" : "var(--brand-primary-light)" }}
                   >
                     {liq.monto_pagado < 0 ? "Regularizacion recibida " : "Pago realizado "}
                     {pesosConSigno(liq.monto_pagado)}
@@ -616,11 +534,7 @@ function ProfesionalCard({
 }
 
 function MiniMetric({
-  icon: Icon,
-  label,
-  value,
-  detail,
-  tone = "teal",
+  icon: Icon, label, value, detail, tone = "teal",
 }: {
   icon: ElementType;
   label: string;
@@ -629,84 +543,54 @@ function MiniMetric({
   tone?: "teal" | "yellow" | "red" | "green" | "blue";
 }) {
   const color =
-    tone === "yellow"
-      ? "#fbbf24"
-      : tone === "red"
-        ? "#f87171"
-        : tone === "green"
-          ? "#4ade80"
-          : tone === "blue"
-            ? "#60a5fa"
-            : "var(--brand-primary-light)";
+    tone === "yellow" ? "#fbbf24"
+    : tone === "red" ? "#f87171"
+    : tone === "green" ? "#4ade80"
+    : tone === "blue" ? "#60a5fa"
+    : "var(--brand-primary-light)";
   return (
     <div
       className="rounded-xl p-3"
-      style={{
-        background: "rgba(255,255,255,0.035)",
-        border: "1px solid var(--border-subtle)",
-      }}
+      style={{ background: "rgba(255,255,255,0.035)", border: "1px solid var(--border-subtle)" }}
     >
       <div className="mb-2 flex items-center gap-2">
         <Icon size={15} style={{ color }} />
-        <span className="text-xs font-semibold" style={{ color: "var(--text-muted)" }}>
-          {label}
-        </span>
+        <span className="text-xs font-semibold" style={{ color: "var(--text-muted)" }}>{label}</span>
       </div>
-      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
-        {value}
-      </p>
-      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-        {detail}
-      </p>
+      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>{value}</p>
+      <p className="text-xs" style={{ color: "var(--text-muted)" }}>{detail}</p>
     </div>
   );
 }
 
 function BreakdownPanel({
-  title,
-  subtitle,
-  rows,
-  tone,
+  title, subtitle, rows, tone,
 }: {
   title: string;
   subtitle: string;
   rows: [string, string][];
-  tone: "teal" | "green" | "blue" | "red";
+  tone: "teal" | "green" | "blue" | "red" | "purple";
 }) {
   const color =
-    tone === "green"
-      ? "#4ade80"
-      : tone === "blue"
-        ? "#60a5fa"
-        : tone === "red"
-          ? "#f87171"
-          : "var(--brand-primary-light)";
-
+    tone === "green" ? "#4ade80"
+    : tone === "blue" ? "#60a5fa"
+    : tone === "red" ? "#f87171"
+    : tone === "purple" ? "#a78bfa"
+    : "var(--brand-primary-light)";
   return (
     <div
       className="rounded-xl p-4"
-      style={{
-        background: "rgba(255,255,255,0.025)",
-        border: "1px solid var(--border-subtle)",
-      }}
+      style={{ background: "rgba(255,255,255,0.025)", border: "1px solid var(--border-subtle)" }}
     >
       <div className="mb-3">
-        <p className="text-sm font-black" style={{ color }}>
-          {title}
-        </p>
-        <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
-          {subtitle}
-        </p>
+        <p className="text-sm font-black" style={{ color }}>{title}</p>
+        <p className="mt-1 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>{subtitle}</p>
       </div>
       <div className="space-y-2">
-        {rows.map(([label, value]) => (
+        {rows.filter(([l]) => l).map(([label, value]) => (
           <div key={label} className="flex items-start justify-between gap-3">
-            <span className="text-xs" style={{ color: "var(--text-muted)" }}>
-              {label}
-            </span>
-            <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>
-              {value}
-            </span>
+            <span className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</span>
+            <span className="text-xs font-bold" style={{ color: "var(--text-primary)" }}>{value}</span>
           </div>
         ))}
       </div>
@@ -717,22 +601,14 @@ function BreakdownPanel({
 function InfoLine({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-xs" style={{ color: "var(--text-muted)" }}>
-        {label}
-      </p>
-      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
-        {value}
-      </p>
+      <p className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</p>
+      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>{value}</p>
     </div>
   );
 }
 
 function SummaryCard({
-  icon: Icon,
-  label,
-  value,
-  color,
-  helper,
+  icon: Icon, label, value, color, helper,
 }: {
   icon: ElementType;
   label: string;
@@ -743,10 +619,7 @@ function SummaryCard({
   return (
     <div
       className="rounded-2xl p-5"
-      style={{
-        background: "var(--card-bg)",
-        border: "1px solid var(--border-subtle)",
-      }}
+      style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
     >
       <div
         className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl"
@@ -754,29 +627,25 @@ function SummaryCard({
       >
         <Icon size={20} style={{ color }} />
       </div>
-      <p className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>
-        {label}
-      </p>
-      <p className="mt-1 text-2xl font-black" style={{ color: "var(--text-primary)" }}>
-        {value}
-      </p>
-      <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
-        {helper}
-      </p>
+      <p className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>{label}</p>
+      <p className="mt-1 text-2xl font-black" style={{ color: "var(--text-primary)" }}>{value}</p>
+      <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>{helper}</p>
     </div>
   );
 }
 
 export default function LiquidacionesPage() {
+  const weekRange = getWeekRange();
   const [profesionales, setProfesionales] = useState<Profesional[]>([]);
   const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState<{
-    prof: Profesional;
-    operacion: Operacion;
-  } | null>(null);
+  const [modal, setModal] = useState<{ prof: Profesional; operacion: Operacion } | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [filtro, setFiltro] = useState<Filtro>("todos");
+  const [tipoFiltro, setTipoFiltro] = useState<TipoFiltro>("todos");
+  const [desde, setDesde] = useState(weekRange.desde);
+  const [hasta, setHasta] = useState(weekRange.hasta);
+  const [page, setPage] = useState(0);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -785,8 +654,12 @@ export default function LiquidacionesPage() {
 
   const fetchData = useCallback(async () => {
     setLoading(true);
+    setPage(0);
     try {
-      const res = await fetch(`${API}/admin/liquidaciones/resumen`, {
+      const params = new URLSearchParams();
+      if (desde) params.set("desde", desde);
+      if (hasta) params.set("hasta", hasta);
+      const res = await fetch(`${API}/admin/liquidaciones/resumen?${params}`, {
         headers: authHeaders(),
       });
       if (res.ok) setProfesionales(await res.json());
@@ -794,11 +667,14 @@ export default function LiquidacionesPage() {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [desde, hasta, showToast]);
 
   useEffect(() => {
     fetchData();
   }, [fetchData]);
+
+  // reset page when filters change
+  useEffect(() => { setPage(0); }, [query, filtro, tipoFiltro]);
 
   const filtered = useMemo(() => {
     return profesionales.filter((p) => {
@@ -809,40 +685,38 @@ export default function LiquidacionesPage() {
         (filtro === "pagar" && p.saldo > 0) ||
         (filtro === "cobrar" && p.saldo < 0) ||
         (filtro === "cero" && p.saldo === 0);
-      return matchesText && matchesFilter;
+      const matchesTipo =
+        tipoFiltro === "todos" ||
+        (tipoFiltro === "medico" && p.tipo?.toLowerCase() !== "enfermero") ||
+        (tipoFiltro === "enfermero" && p.tipo?.toLowerCase() === "enfermero");
+      return matchesText && matchesFilter && matchesTipo;
     });
-  }, [profesionales, query, filtro]);
+  }, [profesionales, query, filtro, tipoFiltro]);
 
-  const totalAPagar = profesionales
-    .filter((p) => p.saldo > 0)
-    .reduce((a, p) => a + p.saldo, 0);
-  const totalACobrar = profesionales
-    .filter((p) => p.saldo < 0)
-    .reduce((a, p) => a + Math.abs(p.saldo), 0);
+  const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
+  const paginated = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  const totalAPagar = profesionales.filter((p) => p.saldo > 0).reduce((a, p) => a + p.saldo, 0);
+  const totalACobrar = profesionales.filter((p) => p.saldo < 0).reduce((a, p) => a + Math.abs(p.saldo), 0);
   const conComision = profesionales.filter((p) => p.saldo < 0).length;
   const conPago = profesionales.filter((p) => p.saldo > 0).length;
-  const totalConsultas = profesionales.reduce(
-    (a, p) => a + p.domicilio_cantidad + p.tele_cantidad,
-    0,
-  );
-  const totalComisionGenerada = profesionales.reduce(
-    (a, p) => a + liquidacionDetalle(p).totalComision,
-    0,
-  );
-  const totalEfectivoBruto = profesionales.reduce(
-    (a, p) => a + liquidacionDetalle(p).efectivoBruto,
-    0,
-  );
-  const totalAppNeto = profesionales.reduce(
-    (a, p) => a + liquidacionDetalle(p).appNeto,
-    0,
-  );
+  const totalConsultas = profesionales.reduce((a, p) => a + p.domicilio_cantidad + p.tele_cantidad, 0);
+  const totalTele = profesionales.reduce((a, p) => a + (p.tele_cantidad ?? 0), 0);
+  const totalComisionGenerada = profesionales.reduce((a, p) => a + liquidacionDetalle(p).totalComision, 0);
+  const totalEfectivoBruto = profesionales.reduce((a, p) => a + liquidacionDetalle(p).efectivoBruto, 0);
+  const totalAppNeto = profesionales.reduce((a, p) => a + liquidacionDetalle(p).appNeto, 0);
 
-  const filtros: { id: Filtro; label: string }[] = [
+  const filtrosSaldo: { id: Filtro; label: string }[] = [
     { id: "todos", label: "Todos" },
-    { id: "cobrar", label: "Comisiones a cobrar" },
-    { id: "pagar", label: "Pagos a profesionales" },
+    { id: "cobrar", label: "Deben a DocYa" },
+    { id: "pagar", label: "DocYa debe pagar" },
     { id: "cero", label: "Al dia" },
+  ];
+
+  const filtrosTipo: { id: TipoFiltro; label: string }[] = [
+    { id: "todos", label: "Todos" },
+    { id: "medico", label: "Médicos" },
+    { id: "enfermero", label: "Enfermeros" },
   ];
 
   return (
@@ -850,80 +724,83 @@ export default function LiquidacionesPage() {
       <Sidebar />
 
       <main className="flex-1 overflow-y-auto px-4 py-8 pt-20 md:px-8 md:pt-8">
+        {/* HEADER */}
         <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
             <div className="mb-2 flex items-center gap-2">
               <span className="badge badge-teal">Administracion</span>
               <span className="badge badge-yellow">80/20 DocYa</span>
             </div>
-            <h1
-              className="text-3xl font-black"
-              style={{ color: "var(--text-primary)" }}
-            >
+            <h1 className="text-3xl font-black" style={{ color: "var(--text-primary)" }}>
               Liquidaciones y comisiones
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
-              Administra desde aca lo que DocYa debe pagar por cobros desde la app y las comisiones del 20% que los profesionales ya transfirieron por consultas cobradas en efectivo.
+              Administra pagos a profesionales y comisiones del 20% por consultas cobradas en efectivo.
             </p>
           </div>
           <button
             onClick={fetchData}
             className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
-            style={{
-              background: "var(--brand-primary)",
-              color: "#fff",
-            }}
+            style={{ background: "var(--brand-primary)", color: "#fff" }}
           >
             <RefreshCw size={16} />
             Actualizar
           </button>
         </div>
 
+        {/* SUMMARY CARDS */}
         <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCard
-            icon={ArrowDownToLine}
-            label="Comisiones a cobrar"
-            value={pesos(totalACobrar)}
-            color="#fbbf24"
-            helper={`${conComision} profesionales deben transferir a DocYa`}
-          />
-          <SummaryCard
-            icon={ArrowUpFromLine}
-            label="Disponible para pagar"
-            value={pesos(totalAPagar)}
-            color="var(--brand-primary-light)"
-            helper={`${conPago} profesionales con transferencia pendiente`}
-          />
-          <SummaryCard
-            icon={ReceiptText}
-            label="Cobrado en efectivo"
-            value={pesos(totalEfectivoBruto)}
-            color="#60a5fa"
-            helper="Dinero que recibieron directo los profesionales"
-          />
-          <SummaryCard
-            icon={BadgeCheck}
-            label="Neto por app"
-            value={pesos(totalAppNeto)}
-            color="#a78bfa"
-            helper={`${totalConsultas} consultas/servicios, comision DocYa ${pesos(totalComisionGenerada)}`}
-          />
+          <SummaryCard icon={ArrowDownToLine} label="Comisiones a cobrar" value={pesos(totalACobrar)} color="#fbbf24"
+            helper={`${conComision} profesionales deben transferir a DocYa`} />
+          <SummaryCard icon={ArrowUpFromLine} label="Disponible para pagar" value={pesos(totalAPagar)} color="var(--brand-primary-light)"
+            helper={`${conPago} profesionales con transferencia pendiente`} />
+          <SummaryCard icon={ReceiptText} label="Cobrado en efectivo" value={pesos(totalEfectivoBruto)} color="#60a5fa"
+            helper="Dinero que recibieron directo los profesionales" />
+          <SummaryCard icon={BadgeCheck} label="Neto por app" value={pesos(totalAppNeto)} color="#a78bfa"
+            helper={`${totalConsultas} total · ${totalTele} teleconsultas · comision ${pesos(totalComisionGenerada)}`} />
         </section>
 
+        {/* FILTROS */}
         <section
           className="mb-5 rounded-2xl p-4"
-          style={{
-            background: "var(--card-bg)",
-            border: "1px solid var(--border-subtle)",
-          }}
+          style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
         >
-          <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          {/* Rango de fechas */}
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>
+              Período
+            </span>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={desde}
+                onChange={(e) => setDesde(e.target.value)}
+                className="rounded-xl px-3 py-2 text-sm outline-none"
+                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
+              />
+              <span className="text-xs" style={{ color: "var(--text-muted)" }}>hasta</span>
+              <input
+                type="date"
+                value={hasta}
+                onChange={(e) => setHasta(e.target.value)}
+                className="rounded-xl px-3 py-2 text-sm outline-none"
+                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
+              />
+              <button
+                onClick={() => { setDesde(weekRange.desde); setHasta(weekRange.hasta); }}
+                className="rounded-xl px-3 py-2 text-xs font-bold transition hover:opacity-80"
+                style={{ background: "rgba(20,184,166,0.12)", color: "var(--brand-primary-light)", border: "1px solid rgba(20,184,166,0.25)" }}
+              >
+                Esta semana
+              </button>
+            </div>
+          </div>
+
+          {/* Buscador + filtros */}
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
             <div
               className="flex min-w-0 flex-1 items-center gap-3 rounded-xl px-3 py-2"
-              style={{
-                background: "var(--input-bg)",
-                border: "1px solid var(--border-subtle)",
-              }}
+              style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)" }}
             >
               <Search size={16} style={{ color: "var(--text-muted)" }} />
               <input
@@ -934,32 +811,44 @@ export default function LiquidacionesPage() {
                 style={{ color: "var(--text-primary)" }}
               />
             </div>
+
             <div className="flex flex-wrap gap-2">
-              {filtros.map((f) => {
-                const active = filtro === f.id;
-                return (
-                  <button
-                    key={f.id}
-                    onClick={() => setFiltro(f.id)}
-                    className="rounded-xl px-3 py-2 text-xs font-bold transition"
-                    style={{
-                      background: active
-                        ? "rgba(20,184,166,0.16)"
-                        : "rgba(255,255,255,0.04)",
-                      color: active
-                        ? "var(--brand-primary-light)"
-                        : "var(--text-muted)",
-                      border: "1px solid var(--border-subtle)",
-                    }}
-                  >
-                    {f.label}
-                  </button>
-                );
-              })}
+              {/* Filtro tipo */}
+              {filtrosTipo.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setTipoFiltro(f.id)}
+                  className="rounded-xl px-3 py-2 text-xs font-bold transition"
+                  style={{
+                    background: tipoFiltro === f.id ? "rgba(167,139,250,0.16)" : "rgba(255,255,255,0.04)",
+                    color: tipoFiltro === f.id ? "#a78bfa" : "var(--text-muted)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
+              <div className="w-px self-stretch" style={{ background: "var(--border-subtle)" }} />
+              {/* Filtro saldo */}
+              {filtrosSaldo.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setFiltro(f.id)}
+                  className="rounded-xl px-3 py-2 text-xs font-bold transition"
+                  style={{
+                    background: filtro === f.id ? "rgba(20,184,166,0.16)" : "rgba(255,255,255,0.04)",
+                    color: filtro === f.id ? "var(--brand-primary-light)" : "var(--text-muted)",
+                    border: "1px solid var(--border-subtle)",
+                  }}
+                >
+                  {f.label}
+                </button>
+              ))}
             </div>
           </div>
         </section>
 
+        {/* LISTA */}
         <section className="space-y-3">
           {loading ? (
             <div className="rounded-2xl p-8 text-center" style={{ background: "var(--card-bg)", color: "var(--text-muted)" }}>
@@ -970,7 +859,7 @@ export default function LiquidacionesPage() {
               No hay profesionales para este filtro.
             </div>
           ) : (
-            filtered.map((p) => (
+            paginated.map((p) => (
               <ProfesionalCard
                 key={p.id}
                 prof={p}
@@ -979,6 +868,38 @@ export default function LiquidacionesPage() {
             ))
           )}
         </section>
+
+        {/* PAGINACION */}
+        {!loading && filtered.length > PAGE_SIZE && (
+          <div className="mt-5 flex items-center justify-between rounded-2xl px-5 py-3"
+            style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
+          >
+            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} de {filtered.length} profesionales
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="rounded-xl p-2 transition hover:bg-white/5 disabled:opacity-30"
+                style={{ border: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}
+              >
+                <ChevronLeft size={16} />
+              </button>
+              <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                {page + 1} / {totalPages}
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="rounded-xl p-2 transition hover:bg-white/5 disabled:opacity-30"
+                style={{ border: "1px solid var(--border-subtle)", color: "var(--text-muted)" }}
+              >
+                <ChevronRight size={16} />
+              </button>
+            </div>
+          </div>
+        )}
       </main>
 
       {modal && (
@@ -987,10 +908,9 @@ export default function LiquidacionesPage() {
           operacion={modal.operacion}
           onClose={() => setModal(null)}
           onDone={() => {
-            const okMsg =
-              modal.operacion === "comision_recibida"
-                ? "Regularizacion marcada como recibida"
-                : "Pago marcado como realizado";
+            const okMsg = modal.operacion === "comision_recibida"
+              ? "Regularizacion marcada como recibida"
+              : "Pago marcado como realizado";
             setModal(null);
             showToast(okMsg);
             fetchData();
@@ -1002,12 +922,8 @@ export default function LiquidacionesPage() {
         <div
           className="fixed bottom-6 right-6 z-50 rounded-xl px-4 py-3 text-sm font-bold shadow-lg"
           style={{
-            background: toast.ok
-              ? "rgba(20,184,166,0.2)"
-              : "rgba(239,68,68,0.2)",
-            border: `1px solid ${
-              toast.ok ? "rgba(20,184,166,0.4)" : "rgba(239,68,68,0.4)"
-            }`,
+            background: toast.ok ? "rgba(20,184,166,0.2)" : "rgba(239,68,68,0.2)",
+            border: `1px solid ${toast.ok ? "rgba(20,184,166,0.4)" : "rgba(239,68,68,0.4)"}`,
             color: toast.ok ? "var(--brand-primary-light)" : "#f87171",
           }}
         >
