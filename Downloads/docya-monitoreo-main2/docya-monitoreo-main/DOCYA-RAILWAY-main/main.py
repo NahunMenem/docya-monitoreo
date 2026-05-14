@@ -3518,6 +3518,23 @@ async def solicitar_consulta(
     # ============================================================
     # 🔵 TARJETA (ACTUALIZA CONSULTA EXISTENTE)
     # ============================================================
+
+    # Verificar que el pago con tarjeta fue autorizado antes de buscar profesional
+    if data.metodo_pago == "tarjeta" and consulta_id_previa:
+        cur_guard = db.cursor()
+        cur_guard.execute(
+            "SELECT mp_preautorizado FROM consultas WHERE id = %s",
+            (consulta_id_previa,),
+        )
+        guard_row = cur_guard.fetchone()
+        cur_guard.close()
+        if guard_row and not guard_row[0]:
+            return {
+                "consulta_id": consulta_id_previa,
+                "estado": "pago_no_autorizado",
+                "mensaje": "El pago no fue autorizado. Intentá con otra tarjeta o pagá con dinero en cuenta MP o en efectivo.",
+            }
+
     if data.metodo_pago in ("tarjeta", "saldo_mp") and consulta_id_previa:
         print(f"💳 Actualizando consulta previa {consulta_id_previa}")
 
@@ -4521,21 +4538,45 @@ def aceptar_consulta(
         """, (consulta_id,))
         db.commit()
     elif payment_id:
-        try:
-            url = f"https://api.mercadopago.com/v1/payments/{payment_id}/capture"
-            headers = {
-                "Authorization": f"Bearer {ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            }
+        capture_ok = False
+        for _attempt in range(3):
+            try:
+                url = f"https://api.mercadopago.com/v1/payments/{payment_id}/capture"
+                headers = {
+                    "Authorization": f"Bearer {ACCESS_TOKEN}",
+                    "Content-Type": "application/json",
+                    "X-Idempotency-Key": str(uuid.uuid4()),
+                }
+                with httpx.Client(timeout=15) as client:
+                    r = client.post(url, headers=headers, json={})
+                if r.status_code in (200, 201):
+                    capture_ok = True
+                    break
+                # Pago ya aprobado en MP → no necesita captura explícita
+                try:
+                    resp_body = r.json()
+                    if resp_body.get("status") in ("approved", "authorized"):
+                        capture_ok = True
+                        break
+                except Exception:
+                    pass
+                print(f"⚠ Intento {_attempt + 1} captura: {r.status_code} {r.text[:200]}")
+            except Exception as _e:
+                print(f"⚠ Intento {_attempt + 1} excepción captura: {_e}")
+            if _attempt < 2:
+                import time as _t; _t.sleep(2)
 
-            with httpx.Client(timeout=5) as client:
-                r = client.post(url, headers=headers, json={})
-
-            if r.status_code not in (200, 201):
-                print("⚠ Error capturando pago MercadoPago:", r.text)
-
-        except Exception as e:
-            print("⚠ Excepción capturando pago:", e)
+        if not capture_ok:
+            print(f"❌ Captura fallida tras 3 intentos consulta={consulta_id} payment={payment_id}")
+            try:
+                cur_fail = db.cursor()
+                cur_fail.execute(
+                    "UPDATE consultas SET mp_status = 'capture_failed' WHERE id = %s",
+                    (consulta_id,),
+                )
+                db.commit()
+            except Exception:
+                pass
 
     return {
         "ok": True,
