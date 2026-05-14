@@ -458,13 +458,13 @@ function ProfesionalCard({
           title="Pagos por app"
           subtitle="DocYa recauda y luego transfiere el neto."
           rows={[
-            [`${appCantidad} ${labelPlural}`, ""],
+            [`${appCantidad} ${labelPlural}`, ""] as [string, string],
             ...(diurnaCantidad + nocturnaCantidad > 0
               ? [
-                  [`☀ Diurnas`, String(diurnaCantidad)],
-                  [`🌙 Nocturnas`, String(nocturnaCantidad)],
+                  [`☀ Diurnas`, String(diurnaCantidad)] as [string, string],
+                  [`🌙 Nocturnas`, String(nocturnaCantidad)] as [string, string],
                 ]
-              : []),
+              : ([] as [string, string][])),
             ["Pagado por pacientes", pesos(detalle.appBruto)],
             ["Comision DocYa 20%", `-${pesos(detalle.appComision)}`],
             ["Neto a profesional", pesos(detalle.appNeto)],
