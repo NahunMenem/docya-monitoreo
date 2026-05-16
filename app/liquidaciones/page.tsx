@@ -108,9 +108,9 @@ function consultaLabel(tipo: string, plural = true) {
     : plural ? "consultas" : "consulta";
 }
 
-function liquidacionDetalle(prof: Profesional) {
+function liquidacionDetalle(prof: Profesional, comisionPorcentaje = 20) {
   const efectivoBruto = prof.domicilio_efectivo_bruto ?? 0;
-  const efectivoComision = prof.domicilio_efectivo_comision ?? efectivoBruto * 0.2;
+  const efectivoComision = prof.domicilio_efectivo_comision ?? efectivoBruto * (comisionPorcentaje / 100);
   const efectivoNeto = Math.max(efectivoBruto - efectivoComision, 0);
   const appBruto = prof.domicilio_app_bruto ?? 0;
   const appNeto = prof.domicilio_app_neto ?? 0;
@@ -278,15 +278,17 @@ function ModalRegistrarMovimiento({
 function ProfesionalCard({
   prof,
   onRegistrar,
+  comisionPorcentaje,
 }: {
   prof: Profesional;
   onRegistrar: (prof: Profesional, operacion: Operacion) => void;
+  comisionPorcentaje: number;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [historial, setHistorial] = useState<Liquidacion[]>([]);
   const [loadingH, setLoadingH] = useState(false);
 
-  const detalle = liquidacionDetalle(prof);
+  const detalle = liquidacionDetalle(prof, comisionPorcentaje);
   const isCobrarComision = prof.saldo < 0;
   const isPagarProfesional = prof.saldo > 0;
   const isCero = prof.saldo === 0;
@@ -383,7 +385,7 @@ function ProfesionalCard({
             icon={ReceiptText}
             label="Comision DocYa"
             value={pesos(detalle.totalComision)}
-            detail="20% generado"
+            detail={`${comisionPorcentaje.toLocaleString("es-AR")}% generado`}
             tone="yellow"
           />
           <MiniMetric
@@ -449,7 +451,7 @@ function ProfesionalCard({
           subtitle="El profesional ya recibio este dinero del paciente."
           rows={[
             ["Cobrado al paciente", pesos(detalle.efectivoBruto)],
-            ["Comision DocYa 20%", `-${pesos(detalle.efectivoComision)}`],
+            [`Comision DocYa ${comisionPorcentaje.toLocaleString("es-AR")}%`, `-${pesos(detalle.efectivoComision)}`],
             ["Neto profesional", pesos(detalle.efectivoNeto)],
           ]}
           tone="green"
@@ -466,7 +468,7 @@ function ProfesionalCard({
                 ]
               : ([] as [string, string][])),
             ["Pagado por pacientes", pesos(detalle.appBruto)],
-            ["Comision DocYa 20%", `-${pesos(detalle.appComision)}`],
+            [`Comision DocYa ${comisionPorcentaje.toLocaleString("es-AR")}%`, `-${pesos(detalle.appComision)}`],
             ["Neto a profesional", pesos(detalle.appNeto)],
           ]}
           tone="blue"
@@ -477,7 +479,7 @@ function ProfesionalCard({
           rows={[
             [`${teleCantidad} teleconsulta${teleCantidad !== 1 ? "s" : ""}`, ""],
             ["Neto profesional", pesos(detalle.teleNeto)],
-            ["Comision DocYa 20%", detalle.teleComision > 0 ? `-${pesos(detalle.teleComision)}` : "$0"],
+            [`Comision DocYa ${comisionPorcentaje.toLocaleString("es-AR")}%`, detalle.teleComision > 0 ? `-${pesos(detalle.teleComision)}` : "$0"],
           ]}
           tone="purple"
         />
@@ -646,6 +648,7 @@ export default function LiquidacionesPage() {
   const [desde, setDesde] = useState(weekRange.desde);
   const [hasta, setHasta] = useState(weekRange.hasta);
   const [page, setPage] = useState(0);
+  const [comisionPorcentaje, setComisionPorcentaje] = useState(20);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -669,9 +672,22 @@ export default function LiquidacionesPage() {
     }
   }, [desde, hasta, showToast]);
 
+  const fetchComision = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/configuracion/comision-docya`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      const porcentaje = Number(data.comision_porcentaje ?? 20);
+      if (Number.isFinite(porcentaje)) setComisionPorcentaje(porcentaje);
+    } catch {}
+  }, []);
+
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
+    fetchComision();
+  }, [fetchData, fetchComision]);
 
   // reset page when filters change
   useEffect(() => { setPage(0); }, [query, filtro, tipoFiltro]);
@@ -702,9 +718,9 @@ export default function LiquidacionesPage() {
   const conPago = profesionales.filter((p) => p.saldo > 0).length;
   const totalConsultas = profesionales.reduce((a, p) => a + p.domicilio_cantidad + p.tele_cantidad, 0);
   const totalTele = profesionales.reduce((a, p) => a + (p.tele_cantidad ?? 0), 0);
-  const totalComisionGenerada = profesionales.reduce((a, p) => a + liquidacionDetalle(p).totalComision, 0);
-  const totalEfectivoBruto = profesionales.reduce((a, p) => a + liquidacionDetalle(p).efectivoBruto, 0);
-  const totalAppNeto = profesionales.reduce((a, p) => a + liquidacionDetalle(p).appNeto, 0);
+  const totalComisionGenerada = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).totalComision, 0);
+  const totalEfectivoBruto = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).efectivoBruto, 0);
+  const totalAppNeto = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).appNeto, 0);
 
   const filtrosSaldo: { id: Filtro; label: string }[] = [
     { id: "todos", label: "Todos" },
@@ -729,13 +745,13 @@ export default function LiquidacionesPage() {
           <div>
             <div className="mb-2 flex items-center gap-2">
               <span className="badge badge-teal">Administracion</span>
-              <span className="badge badge-yellow">80/20 DocYa</span>
+              <span className="badge badge-yellow">Comision {comisionPorcentaje.toLocaleString("es-AR")}%</span>
             </div>
             <h1 className="text-3xl font-black" style={{ color: "var(--text-primary)" }}>
               Liquidaciones y comisiones
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
-              Administra pagos a profesionales y comisiones del 20% por consultas cobradas en efectivo.
+              Administra pagos a profesionales y comisiones DocYa por consultas cobradas en efectivo.
             </p>
           </div>
           <button
@@ -864,6 +880,7 @@ export default function LiquidacionesPage() {
                 key={p.id}
                 prof={p}
                 onRegistrar={(prof, operacion) => setModal({ prof, operacion })}
+                comisionPorcentaje={comisionPorcentaje}
               />
             ))
           )}

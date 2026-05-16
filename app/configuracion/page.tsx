@@ -24,6 +24,11 @@ type Zona = {
   orden: number;
 };
 
+type ComisionConfig = {
+  comision_porcentaje: number;
+  profesional_porcentaje: number;
+};
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const TIPO_LABELS: Record<string, string> = {
@@ -276,8 +281,12 @@ function ZonaModal({
 export default function ConfiguracionPage() {
   const [tarifas, setTarifas] = useState<Tarifa[]>([]);
   const [zonas, setZonas] = useState<Zona[]>([]);
+  const [comision, setComision] = useState<ComisionConfig>({ comision_porcentaje: 20, profesional_porcentaje: 80 });
+  const [comisionInput, setComisionInput] = useState("20");
   const [loadingTarifas, setLoadingTarifas] = useState(true);
   const [loadingZonas, setLoadingZonas] = useState(true);
+  const [loadingComision, setLoadingComision] = useState(true);
+  const [savingComision, setSavingComision] = useState(false);
   const [tarifaModal, setTarifaModal] = useState<Partial<Tarifa> | null>(null);
   const [zonaModal, setZonaModal] = useState<Partial<Zona> | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
@@ -303,6 +312,25 @@ export default function ConfiguracionPage() {
     }
   }
 
+  async function fetchComision() {
+    setLoadingComision(true);
+    try {
+      const res = await fetch(`${API}/admin/configuracion/comision-docya`, { headers: authHeaders() });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const porcentaje = Number(data.comision_porcentaje ?? 20);
+      setComision({
+        comision_porcentaje: porcentaje,
+        profesional_porcentaje: Number(data.profesional_porcentaje ?? 100 - porcentaje),
+      });
+      setComisionInput(String(porcentaje));
+    } catch {
+      showToast("Error al cargar comision DocYa", false);
+    } finally {
+      setLoadingComision(false);
+    }
+  }
+
   async function fetchZonas() {
     setLoadingZonas(true);
     try {
@@ -321,6 +349,8 @@ export default function ConfiguracionPage() {
   useEffect(() => {
     fetchTarifas();
     fetchZonas();
+    fetchComision();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── tarifas ────────────────────────────────────────────────────────────────
@@ -377,6 +407,39 @@ export default function ConfiguracionPage() {
   }
 
   // ── zonas ──────────────────────────────────────────────────────────────────
+
+  async function saveComision() {
+    const porcentaje = Number(comisionInput);
+    if (!Number.isFinite(porcentaje) || porcentaje < 0 || porcentaje > 100) {
+      showToast("La comision debe estar entre 0 y 100", false);
+      return;
+    }
+    setSavingComision(true);
+    try {
+      const res = await fetch(`${API}/admin/configuracion/comision-docya`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ comision_porcentaje: porcentaje }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Error al guardar comision" }));
+        showToast(err.detail ?? "Error al guardar comision", false);
+        return;
+      }
+      const data = await res.json();
+      const nextPorcentaje = Number(data.comision_porcentaje ?? porcentaje);
+      setComision({
+        comision_porcentaje: nextPorcentaje,
+        profesional_porcentaje: Number(data.profesional_porcentaje ?? 100 - nextPorcentaje),
+      });
+      setComisionInput(String(nextPorcentaje));
+      showToast("Comision DocYa actualizada");
+    } catch {
+      showToast("Error de conexion", false);
+    } finally {
+      setSavingComision(false);
+    }
+  }
 
   async function saveZona(data: Partial<Zona>) {
     try {
@@ -439,6 +502,51 @@ export default function ConfiguracionPage() {
         </p>
 
         {/* ── Tarifas ── */}
+        <section className="mb-10">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <DollarSign size={18} style={{ color: "var(--brand-primary)" }} />
+              <h2 className="text-lg font-semibold" style={{ color: "var(--text-primary)" }}>Comision DocYa</h2>
+            </div>
+          </div>
+
+          <div
+            className="rounded-xl p-5"
+            style={{ border: "1px solid var(--border-subtle)", background: "var(--card-bg)" }}
+          >
+            {loadingComision ? (
+              <p className="text-sm" style={{ color: "var(--text-muted)" }}>Cargando comision...</p>
+            ) : (
+              <div className="grid gap-4 md:grid-cols-[220px_1fr_auto] md:items-end">
+                <div>
+                  <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Porcentaje (%)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.01}
+                    className="w-full rounded-lg px-3 py-2 text-sm"
+                    style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
+                    value={comisionInput}
+                    onChange={(e) => setComisionInput(e.target.value)}
+                  />
+                </div>
+                <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+                  Se aplica solo a pagos nuevos. El profesional recibe {comision.profesional_porcentaje.toLocaleString("es-AR")}% y las liquidaciones historicas no se recalculan.
+                </p>
+                <button
+                  onClick={saveComision}
+                  disabled={savingComision}
+                  className="px-4 py-2 rounded-lg text-sm font-medium transition-opacity disabled:opacity-50"
+                  style={{ background: "var(--brand-primary)", color: "#fff" }}
+                >
+                  {savingComision ? "Guardando..." : "Guardar comision"}
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+
         <section className="mb-10">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
