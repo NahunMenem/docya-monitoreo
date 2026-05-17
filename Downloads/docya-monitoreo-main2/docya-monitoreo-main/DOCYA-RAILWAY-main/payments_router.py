@@ -502,6 +502,23 @@ def guardar_metodo_pago(data: PaymentMethodSaveIn, db=Depends(get_db)):
 @router.post("/pagos/embebido/autorizar")
 def autorizar_pago_embebido(data: EmbeddedPaymentIn, db=Depends(get_db)):
     """Autoriza el pago sin capturarlo todavía; la captura ocurre cuando aceptan la consulta."""
+    # Guard anti-doble-tap: si ya existe una preautorización activa, devolver la existente
+    cur_check = db.cursor()
+    cur_check.execute(
+        "SELECT mp_payment_id, mp_status FROM consultas WHERE id = %s",
+        (data.consulta_id,),
+    )
+    existing = cur_check.fetchone()
+    cur_check.close()
+    if existing and existing[0] and existing[1] in ("authorized", "preautorizado"):
+        print(f"⚠️ Pago ya autorizado para consulta {data.consulta_id} → devolviendo existente")
+        return {
+            "status": existing[1],
+            "authorized": True,
+            "payment_id": existing[0],
+            "amount": float(get_forced_consulta_price() or data.monto),
+        }
+
     user = _get_user_profile(db, data.paciente_uuid)
     payer_email = data.payer_email or user["email"]
     identification_number = data.identification_number or (user.get("dni") or "")
@@ -693,6 +710,8 @@ def formulario_pago_embebido(
           </head>
           <body>
             <div class="card">
+              <img src="https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/logoblanco_1_qdlnog.png"
+                   alt="DocYa" style="height:36px;margin-bottom:20px;display:block;margin-left:auto;margin-right:auto;" />
               <div class="icon">💳</div>
               <h1>Solo aceptamos tarjetas de crédito</h1>
               <p class="sub">Para pagar con tarjeta, usá una <strong>tarjeta de crédito</strong> vigente.</p>
@@ -820,6 +839,8 @@ def formulario_pago_embebido(
       <body>
         <div class="wrap">
           <div class="card">
+            <img src="https://res.cloudinary.com/dqsacd9ez/image/upload/v1757197807/logoblanco_1_qdlnog.png"
+                 alt="DocYa" style="height:32px;display:block;margin:0 auto 16px;" />
             <h1>Pagar dentro de DocYa</h1>
             <p>Autorizás la consulta sin salir de la app. El cobro final se captura cuando un profesional acepta.</p>
             <div class="brands">
@@ -1263,10 +1284,14 @@ def capturar_pago(data: dict, db=Depends(get_db)):
     consulta_id = data["consulta_id"]
 
     cur = db.cursor()
-    cur.execute("SELECT mp_payment_id FROM consultas WHERE id=%s", (consulta_id,))
+    cur.execute("SELECT mp_payment_id, COALESCE(mp_capturado, FALSE) FROM consultas WHERE id=%s", (consulta_id,))
     row = cur.fetchone()
     if not row or not row[0]:
         raise HTTPException(400, "Payment no encontrado")
+
+    if row[1]:
+        print(f"⚠️ Pago consulta {consulta_id} ya capturado → devolviendo OK sin llamar a MP")
+        return {"status": "capturado", "payment_status": "approved"}
 
     payment_id = row[0]
     response = requests.put(

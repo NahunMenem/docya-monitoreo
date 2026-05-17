@@ -29,6 +29,12 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from psycopg2.extras import RealDictCursor
+from commission_config import (
+    calculate_commission_amount,
+    commission_payload,
+    get_docya_commission_percent,
+    set_docya_commission_percent,
+)
 
 # Google & Email
 from google.oauth2 import id_token
@@ -2311,8 +2317,12 @@ async def intentar_reasignar(
             if not medicos:
                 print(f"No hay medicos disponibles en ciclo {ciclo} tipo={tipo} canal={canal_atencion} radio={PRO_ASSIGNMENT_RADIUS_KM}km ws_activos={list(active_medicos.keys())}")
                 print("❌ No hay médicos disponibles en este ciclo")
-                db.rollback() # Liberamos transacción antes de dormir
+                db.rollback()
                 cur.close()
+                if canal_atencion == "domicilio":
+                    print(f"🔔 Consulta {consulta_id}: sin disponibles → broadcast inmediato a todos en radio")
+                    publicar_consulta_domicilio_disponible(db, consulta_id)
+                    return False
                 await asyncio.sleep(espera_segundos)
                 continue
 
@@ -2954,8 +2964,20 @@ async def procesar_timeouts(db):
             db.commit()
 
             # 4. Disparar motor de reasignación
-            # IMPORTANTE: Pasamos el ID del médico que falló para excluirlo en la búsqueda inmediata
-            await intentar_reasignar(consulta_id, db, excluir_medico_id=medico_id)
+            # Si ya fallaron 3 médicos distintos, broadcast a todos en el radio (disponibles o no)
+            cur.execute("""
+                SELECT COUNT(DISTINCT medico_id)
+                FROM intentos_asignacion
+                WHERE consulta_id = %s
+            """, (consulta_id,))
+            total_intentos_distintos = cur.fetchone()[0]
+
+            if total_intentos_distintos >= 3:
+                print(f"🔔 Consulta {consulta_id}: 3 médicos ya fallaron → broadcast a todos en radio")
+                publicar_consulta_domicilio_disponible(db, consulta_id)
+            else:
+                # IMPORTANTE: Pasamos el ID del médico que falló para excluirlo en la búsqueda inmediata
+                await intentar_reasignar(consulta_id, db, excluir_medico_id=medico_id)
 
     except Exception as e:
         print(f"❌ Error en procesar_timeouts: {e}")
@@ -4552,7 +4574,7 @@ def aceptar_consulta(
                 headers = {
                     "Authorization": f"Bearer {ACCESS_TOKEN}",
                     "Content-Type": "application/json",
-                    "X-Idempotency-Key": str(uuid.uuid4()),
+                    "X-Idempotency-Key": f"capture-{payment_id}",
                 }
                 with httpx.Client(timeout=15) as client:
                     r = client.post(url, headers=headers, json={})
@@ -4850,7 +4872,8 @@ def registrar_pago_interno(consulta_id, medico_id, paciente_uuid, metodo_pago, d
     monto_total = row[0]
 
     # 2️⃣ Calcular comisión y neto
-    docya_comision = int(monto_total * 0.20)
+    comision_porcentaje = get_docya_commission_percent(db)
+    docya_comision = calculate_commission_amount(monto_total, comision_porcentaje)
 
     if metodo_pago == "efectivo":
         # Médico cobra todo → luego DocYa descuenta su parte
@@ -4858,7 +4881,7 @@ def registrar_pago_interno(consulta_id, medico_id, paciente_uuid, metodo_pago, d
         saldo_delta = -docya_comision     # médico debe a DocYa
     else:
         # MP / Tarjeta / Transferencia → DocYa recauda
-        medico_neto = int(monto_total * 0.80)
+        medico_neto = int(monto_total - docya_comision)
         saldo_delta = medico_neto         # DocYa le debe al médico
 
     # 3️⃣ Insertar pago (SIN paciente_uuid)
@@ -8124,7 +8147,10 @@ def teleconsulta_stats_medico(medico_id: int, db=Depends(get_db)):
     """)
     tarifa_row = cur.fetchone()
     tarifa = float(tarifa_row["monto"] if tarifa_row else 15000)
-    neto_estimado = round(tarifa * 0.80 * total)
+    comision_porcentaje = get_docya_commission_percent(db)
+    docya_comision = calculate_commission_amount(tarifa, comision_porcentaje)
+    neto_por_teleconsulta = int(tarifa - docya_comision)
+    neto_estimado = round(neto_por_teleconsulta * total)
 
     cur.close()
     return {
@@ -8132,6 +8158,8 @@ def teleconsulta_stats_medico(medico_id: int, db=Depends(get_db)):
         "cobradas_app": cobradas,
         "neto_estimado": neto_estimado,
         "tarifa_referencia": tarifa,
+        "comision_porcentaje": float(comision_porcentaje),
+        "neto_por_teleconsulta": neto_por_teleconsulta,
     }
 
 # --- Disponibilidad alias ---
@@ -9243,17 +9271,18 @@ def registrar_pago(consulta_id: int, data: PagoConsultaIn, db=Depends(get_db)):
     monto_total = _get_precio_consulta(cur, tipo, es_nocturna)
 
     # 5️⃣ Calcular según método de pago
-    # Comisión estándar DocYa = 20%
-    docya_comision = int(monto_total * 0.20)
+    # Comisión DocYa según configuración vigente
+    comision_porcentaje = get_docya_commission_percent(db)
+    docya_comision = calculate_commission_amount(monto_total, comision_porcentaje)
 
     if metodo_pago == "efectivo":
-        # Médico cobró el total → le debe 20% a DocYa
+        # Médico cobró el total → le debe la comisión vigente a DocYa
         medico_neto = monto_total
         saldo_delta = -docya_comision  # médico le debe a DocYa
         mensaje = f"Consulta registrada: el profesional debe a DocYa ${docya_comision}"
     else:
-        # Tarjeta: DocYa cobra → debe pagar 80% al profesional
-        medico_neto = int(monto_total * 0.80)
+        # Tarjeta: DocYa cobra → debe pagar el neto al profesional
+        medico_neto = int(monto_total - docya_comision)
         saldo_delta = medico_neto      # DocYa le debe al profesional
         mensaje = f"Consulta registrada: DocYa debe pagar ${medico_neto} al profesional"
 
@@ -10477,15 +10506,33 @@ def medicos_mapa(db=Depends(get_db)):
 # 💰 TARIFAS DE CONSULTA
 # ====================================================
 
+def _tarifa_response(conn, tipo: str, monto, descripcion: str):
+    comision_porcentaje = get_docya_commission_percent(conn)
+    config = commission_payload(conn)
+    docya_comision = calculate_commission_amount(monto, comision_porcentaje)
+    monto_profesional = int(monto - docya_comision)
+    return {
+        "tipo": tipo,
+        "monto": monto,
+        "descripcion": descripcion,
+        "comision_porcentaje": config["comision_porcentaje"],
+        "profesional_porcentaje": config["profesional_porcentaje"],
+        "docya_comision": docya_comision,
+        "monto_profesional": monto_profesional,
+        "neto_profesional": monto_profesional,
+    }
+
+
 @app.get("/tarifas/consulta-medico")
 def get_tarifa_consulta_medico(conn=Depends(get_db)):
     forced_price = get_forced_consulta_price()
     if forced_price is not None:
-        return {
-            "tipo": "prueba",
-            "monto": forced_price,
-            "descripcion": "Monto temporal de prueba configurado desde backend.",
-        }
+        return _tarifa_response(
+            conn,
+            "prueba",
+            forced_price,
+            "Monto temporal de prueba configurado desde backend.",
+        )
 
     ahora = now_argentina()
     h = ahora.hour
@@ -10504,22 +10551,19 @@ def get_tarifa_consulta_medico(conn=Depends(get_db)):
     if not tarifa:
         raise HTTPException(status_code=404, detail="Tarifa no configurada")
 
-    return {
-        "tipo": tarifa["tipo"],
-        "monto": tarifa["monto"],
-        "descripcion": tarifa["descripcion"],
-    }
+    return _tarifa_response(conn, tarifa["tipo"], tarifa["monto"], tarifa["descripcion"])
 
 
 @app.get("/tarifas/consulta-enfermero")
 def get_tarifa_consulta_enfermero(conn=Depends(get_db)):
     forced_price = get_forced_consulta_price()
     if forced_price is not None:
-        return {
-            "tipo": "prueba",
-            "monto": forced_price,
-            "descripcion": "Monto temporal de prueba configurado desde backend.",
-        }
+        return _tarifa_response(
+            conn,
+            "prueba",
+            forced_price,
+            "Monto temporal de prueba configurado desde backend.",
+        )
 
     ahora = now_argentina()
     h = ahora.hour
@@ -10538,11 +10582,7 @@ def get_tarifa_consulta_enfermero(conn=Depends(get_db)):
     if not tarifa:
         raise HTTPException(status_code=404, detail="Tarifa no configurada")
 
-    return {
-        "tipo": tarifa["tipo"],
-        "monto": tarifa["monto"],
-        "descripcion": tarifa["descripcion"],
-    }
+    return _tarifa_response(conn, tarifa["tipo"], tarifa["monto"], tarifa["descripcion"])
 
 
 # ====================================================
@@ -10553,11 +10593,12 @@ def get_tarifa_consulta_enfermero(conn=Depends(get_db)):
 def get_tarifa_teleconsulta(conn=Depends(get_db)):
     forced_price = get_forced_consulta_price()
     if forced_price is not None:
-        return {
-            "tipo": "prueba",
-            "monto": forced_price,
-            "descripcion": "Monto temporal de prueba configurado desde backend.",
-        }
+        return _tarifa_response(
+            conn,
+            "prueba",
+            forced_price,
+            "Monto temporal de prueba configurado desde backend.",
+        )
 
     ahora = now_argentina()
     h = ahora.hour
@@ -10599,11 +10640,7 @@ def get_tarifa_teleconsulta(conn=Depends(get_db)):
 
     cur.close()
 
-    return {
-        "tipo": tarifa["tipo"],
-        "monto": tarifa["monto"],
-        "descripcion": tarifa["descripcion"],
-    }
+    return _tarifa_response(conn, tarifa["tipo"], tarifa["monto"], tarifa["descripcion"])
 
 
 @app.get("/zonas-cobertura")
@@ -10624,6 +10661,26 @@ def get_zonas_cobertura(conn=Depends(get_db)):
 # ====================================================
 # 💰 GESTIÓN DE TARIFAS (CRUD)
 # ====================================================
+
+@app.get("/configuracion/comision-docya")
+def get_comision_docya(conn=Depends(get_db)):
+    return commission_payload(conn)
+
+
+@app.get("/admin/configuracion/comision-docya")
+def get_admin_comision_docya(conn=Depends(get_db)):
+    return commission_payload(conn)
+
+
+@app.put("/admin/configuracion/comision-docya")
+def update_admin_comision_docya(payload: dict, conn=Depends(get_db)):
+    valor = payload.get("comision_porcentaje", payload.get("porcentaje"))
+    try:
+        set_docya_commission_percent(conn, valor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"message": "Comision DocYa actualizada", **commission_payload(conn)}
+
 
 @app.get("/admin/tarifas")
 def get_all_tarifas(conn=Depends(get_db)):
