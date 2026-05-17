@@ -25,7 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-const Map = dynamic(() => import("./mapa-medicos"), { ssr: false });
+const MapaComponent = dynamic(() => import("./mapa-medicos"), { ssr: false });
 
 const API = process.env.NEXT_PUBLIC_API_BASE!;
 
@@ -122,17 +122,17 @@ function getWeekStart(dateStr: string): string {
 }
 
 function agruparDatos(data: UsuarioCrecimiento[], granularidad: Granularidad) {
-  const map = new Map<string, number>();
+  const acc: Record<string, number> = {};
   data.forEach((item) => {
     const key =
       granularidad === "mensual"
         ? item.fecha.substring(0, 7)
         : getWeekStart(item.fecha);
-    map.set(key, (map.get(key) ?? 0) + Number(item.nuevos || 0));
+    acc[key] = (acc[key] ?? 0) + Number(item.nuevos || 0);
   });
-  return Array.from(map.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([fecha, nuevos]) => ({ fecha, nuevos }));
+  return Object.entries(acc)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map((entry) => ({ fecha: entry[0], nuevos: entry[1] }));
 }
 
 export default function DashboardHome() {
@@ -365,7 +365,7 @@ export default function DashboardHome() {
 
         <div className="p-4">
           <div className="h-72 md:h-96 rounded-xl overflow-hidden" style={{ border: "1px solid var(--border-subtle)" }}>
-            <Map />
+            <MapaComponent />
           </div>
         </div>
 
