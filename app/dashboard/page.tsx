@@ -111,12 +111,37 @@ function StatusBadge({ tipo }: { tipo: string }) {
   );
 }
 
+type Granularidad = "semanal" | "mensual";
+
+function getWeekStart(dateStr: string): string {
+  const d = new Date(`${dateStr}T00:00:00`);
+  const day = d.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().split("T")[0];
+}
+
+function agruparDatos(data: UsuarioCrecimiento[], granularidad: Granularidad) {
+  const map = new Map<string, number>();
+  data.forEach((item) => {
+    const key =
+      granularidad === "mensual"
+        ? item.fecha.substring(0, 7)
+        : getWeekStart(item.fecha);
+    map.set(key, (map.get(key) ?? 0) + Number(item.nuevos || 0));
+  });
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([fecha, nuevos]) => ({ fecha, nuevos }));
+}
+
 export default function DashboardHome() {
   const [resumen, setResumen] = useState<Resumen | null>(null);
   const [tiempoAtencion, setTiempoAtencion] = useState<number>(0);
   const [tiempoLlegada, setTiempoLlegada] = useState<number>(0);
   const [profesionales, setProfesionales] = useState<Profesional[]>([]);
   const [crecimientoUsuarios, setCrecimientoUsuarios] = useState<UsuarioCrecimiento[]>([]);
+  const [granularidad, setGranularidad] = useState<Granularidad>("mensual");
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
   const medicosConectados = profesionales.filter((p) => p.tipo === "medico").length;
@@ -216,27 +241,60 @@ export default function DashboardHome() {
         >
           <div>
             <h2 className="font-semibold text-sm" style={{ color: "var(--text-primary)" }}>
-              Nuevos usuarios - ultimos 6 meses
+              Nuevos usuarios — últimos 6 meses
             </h2>
             <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>
-              Evolucion diaria de pacientes registrados
+              {granularidad === "mensual" ? "Evolución mensual" : "Evolución semanal"} de pacientes registrados
             </p>
           </div>
-          <span className="badge badge-teal">
-            {crecimientoUsuarios.reduce((sum, item) => sum + Number(item.nuevos || 0), 0)} nuevos
-          </span>
+          <div className="flex items-center gap-3">
+            {/* Toggle semanal / mensual */}
+            <div
+              className="flex rounded-lg overflow-hidden"
+              style={{ border: "1px solid var(--border-subtle)" }}
+            >
+              {(["semanal", "mensual"] as Granularidad[]).map((g) => (
+                <button
+                  key={g}
+                  onClick={() => setGranularidad(g)}
+                  style={{
+                    padding: "5px 14px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    fontFamily: "inherit",
+                    cursor: "pointer",
+                    border: "none",
+                    background: granularidad === g ? "var(--brand-primary)" : "transparent",
+                    color: granularidad === g ? "#fff" : "var(--text-muted)",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  {g.charAt(0).toUpperCase() + g.slice(1)}
+                </button>
+              ))}
+            </div>
+            <span className="badge badge-teal">
+              {crecimientoUsuarios.reduce((sum, item) => sum + Number(item.nuevos || 0), 0)} nuevos
+            </span>
+          </div>
         </div>
 
         <div className="h-72 p-4">
           {crecimientoUsuarios.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={crecimientoUsuarios} margin={{ top: 10, right: 18, left: -12, bottom: 0 }}>
+              <LineChart
+                data={agruparDatos(crecimientoUsuarios, granularidad)}
+                margin={{ top: 10, right: 18, left: -12, bottom: 0 }}
+              >
                 <XAxis
                   dataKey="fecha"
-                  tickFormatter={(value) =>
-                    new Date(`${value}T00:00:00`).toLocaleDateString("es-AR", { month: "short" })
-                  }
-                  minTickGap={28}
+                  tickFormatter={(value) => {
+                    const d = new Date(`${value}T00:00:00`);
+                    return granularidad === "mensual"
+                      ? d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" })
+                      : d.toLocaleDateString("es-AR", { day: "2-digit", month: "short" });
+                  }}
+                  minTickGap={granularidad === "mensual" ? 20 : 40}
                   tick={{ fill: "var(--text-muted)", fontSize: 11 }}
                   axisLine={{ stroke: "var(--border-subtle)" }}
                   tickLine={false}
@@ -254,13 +312,12 @@ export default function DashboardHome() {
                     borderRadius: 12,
                     color: "var(--text-primary)",
                   }}
-                  labelFormatter={(value) =>
-                    new Date(`${value}T00:00:00`).toLocaleDateString("es-AR", {
-                      day: "2-digit",
-                      month: "long",
-                      year: "numeric",
-                    })
-                  }
+                  labelFormatter={(value) => {
+                    const d = new Date(`${value}T00:00:00`);
+                    return granularidad === "mensual"
+                      ? d.toLocaleDateString("es-AR", { month: "long", year: "numeric" })
+                      : `Semana del ${d.toLocaleDateString("es-AR", { day: "2-digit", month: "long", year: "numeric" })}`;
+                  }}
                   formatter={(value: number) => [value, "Nuevos usuarios"]}
                 />
                 <Line
@@ -268,7 +325,7 @@ export default function DashboardHome() {
                   dataKey="nuevos"
                   stroke="var(--brand-primary)"
                   strokeWidth={2.5}
-                  dot={false}
+                  dot={granularidad === "mensual"}
                   activeDot={{ r: 4 }}
                 />
               </LineChart>
