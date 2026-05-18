@@ -239,7 +239,7 @@ export default function ConsultasPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  {["ID", "Fecha", "Estado", "Paciente", "Profesional", "Canal", "Tipo consulta", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
+                  {["ID", "Fecha", "Estado", "Paciente", "Motivo", "Profesional", "Canal", "Tipo consulta", "Pago", "Dirección", "Llegada", "Duración", ""].map((h) => (
                     <th key={h}>{h}</th>
                   ))}
                 </tr>
@@ -256,6 +256,9 @@ export default function ConsultasPage() {
                       <td className="whitespace-nowrap text-xs">{format(new Date(c.creado_en), "dd/MM/yy HH:mm", { locale: es })}</td>
                       <td><span className={`badge ${est.badgeClass}`}>{est.label}</span></td>
                       <td className="font-medium" style={{ color: "var(--text-primary)" }}>{c.paciente}</td>
+                      <td className="max-w-[220px] min-w-[180px] text-xs" title={c.motivo || "Sin motivo informado"}>
+                        <span className="line-clamp-2">{c.motivo || "Sin motivo informado"}</span>
+                      </td>
                       <td>{c.profesional}</td>
                       <td>
                         <span className={`badge ${esTeleconsulta ? "badge-blue" : "badge-teal"}`}>
