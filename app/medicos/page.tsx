@@ -4,7 +4,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   Search, ShieldCheck, ShieldOff, Trash2, Pencil, MessageCircle,
-  ImageIcon, X, Stethoscope, Wifi, WifiOff, Users,
+  Mail, Clock, ImageIcon, X, Stethoscope, Wifi, Users,
 } from "lucide-react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE!;
@@ -26,6 +26,10 @@ type Medico = {
   tipo: "medico" | "enfermero";
   validado: boolean;
   matricula_validada: boolean;
+  perfil_completo?: boolean;
+  perfil_recordatorio_step?: number;
+  perfil_recordatorio_ultimo_at?: string | null;
+  perfil_recordatorio_manual_count?: number;
   ultimo_ping?: string | null;
   created_at?: string;
   foto_perfil?: string;
@@ -39,6 +43,50 @@ function isOnline(ping?: string | null): boolean {
   return Date.now() - new Date(ping).getTime() < 5 * 60 * 1000;
 }
 
+function isMatriculaProvisoria(matricula?: string | null): boolean {
+  const value = (matricula || "").toUpperCase();
+  return value.startsWith("GOOGLE-") || value.startsWith("APPLE-");
+}
+
+function matriculaDisplay(m: Medico): string {
+  if (!m.matricula) return "—";
+  if (!m.perfil_completo && isMatriculaProvisoria(m.matricula)) return "Pendiente";
+  return m.matricula;
+}
+
+function estadoProfesional(m: Medico) {
+  if (!m.perfil_completo) {
+    return {
+      label: "Registro incompleto",
+      badge: "badge-yellow",
+      icon: Clock,
+      detail: "Debe completar datos, documentacion y terminos",
+    };
+  }
+  if (!m.matricula_validada) {
+    return {
+      label: "Pendiente validacion",
+      badge: "badge-yellow",
+      icon: ShieldOff,
+      detail: "Perfil completo, falta validar matricula",
+    };
+  }
+  if (!m.validado) {
+    return {
+      label: "Bloqueado",
+      badge: "badge-red",
+      icon: ShieldOff,
+      detail: "Acceso deshabilitado manualmente",
+    };
+  }
+  return {
+    label: "Habilitado",
+    badge: "badge-green",
+    icon: ShieldCheck,
+    detail: "Puede operar en DocYa Pro",
+  };
+}
+
 export default function MedicosPage() {
   const [medicos, setMedicos] = useState<Medico[]>([]);
   const [search, setSearch] = useState("");
@@ -47,6 +95,7 @@ export default function MedicosPage() {
   const [fotoGrande, setFotoGrande] = useState<string | null>(null);
   const [editarMedico, setEditarMedico] = useState<Medico | null>(null);
   const [loadingId, setLoadingId] = useState<number | null>(null);
+  const [recordatorioId, setRecordatorioId] = useState<number | null>(null);
   const [expandedMedicoId, setExpandedMedicoId] = useState<number | null>(null);
 
   const fetchMedicos = async () => {
@@ -109,10 +158,32 @@ export default function MedicosPage() {
     fetchMedicos();
   };
 
+  const enviarRecordatorioPerfil = async (m: Medico) => {
+    if (m.perfil_completo) return;
+    if (!confirm(`Enviar email para que ${m.full_name} complete su cuenta?`)) return;
+    setRecordatorioId(m.id);
+    try {
+      const res = await fetch(`${API}/monitoreo/medicos/${m.id}/recordatorio_perfil`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || data?.error || "No se pudo enviar el recordatorio");
+      }
+      alert(data?.mensaje || "Recordatorio enviado");
+      fetchMedicos();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "No se pudo enviar el recordatorio");
+    } finally {
+      setRecordatorioId(null);
+    }
+  };
+
   const totalMedicos = medicos.filter((m) => m.tipo === "medico").length;
   const totalEnfermeros = medicos.filter((m) => m.tipo === "enfermero").length;
   const totalOnline = medicos.filter((m) => isOnline(m.ultimo_ping)).length;
-  const totalValidados = medicos.filter((m) => m.validado).length;
+  const totalValidados = medicos.filter((m) => m.perfil_completo && m.matricula_validada && m.validado).length;
+  const totalIncompletos = medicos.filter((m) => !m.perfil_completo).length;
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
@@ -126,12 +197,13 @@ export default function MedicosPage() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-5 gap-4">
           {[
             { label: "Médicos", value: totalMedicos, icon: Stethoscope, color: "var(--brand-primary)" },
             { label: "Enfermeros", value: totalEnfermeros, icon: Users, color: "#3b82f6" },
             { label: "En línea ahora", value: totalOnline, icon: Wifi, color: "#22c55e" },
-            { label: "Acceso habilitado", value: totalValidados, icon: ShieldCheck, color: "#f59e0b" },
+            { label: "Incompletos", value: totalIncompletos, icon: Clock, color: "#f59e0b" },
+            { label: "Habilitados", value: totalValidados, icon: ShieldCheck, color: "#22c55e" },
           ].map(({ label, value, icon: Icon, color }) => (
             <div key={label} className="kpi-card">
               <div className="flex items-center gap-3">
@@ -188,6 +260,8 @@ export default function MedicosPage() {
               <tbody>
                 {medicosFiltrados.map((m) => {
                   const online = isOnline(m.ultimo_ping);
+                  const estado = estadoProfesional(m);
+                  const EstadoIcon = estado.icon;
                   return (
                     <Fragment key={m.id}>
                     <tr
@@ -226,11 +300,11 @@ export default function MedicosPage() {
                       </td>
                       <td className="text-sm">{m.especialidad || "—"}</td>
                       <td className="text-sm">{m.localidad ? `${m.localidad}, ${m.provincia}` : "—"}</td>
-                      <td className="font-mono text-xs">{m.matricula || "—"}</td>
+                      <td className="font-mono text-xs">{matriculaDisplay(m)}</td>
                       <td>
-                        {m.validado
-                          ? <span className="badge badge-green"><ShieldCheck size={10} /> Habilitado</span>
-                          : <span className="badge badge-red"><ShieldOff size={10} /> Bloqueado</span>}
+                        <span className={`badge ${estado.badge}`} title={estado.detail}>
+                          <EstadoIcon size={10} /> {estado.label}
+                        </span>
                       </td>
                       <td>
                         <div className="flex items-center gap-1.5">
@@ -241,6 +315,20 @@ export default function MedicosPage() {
                       </td>
                       <td>
                         <div className="flex items-center gap-1">
+                          {!m.perfil_completo && (
+                            <button
+                              title="Enviar email para completar cuenta"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                enviarRecordatorioPerfil(m);
+                              }}
+                              disabled={recordatorioId === m.id}
+                              className="p-1.5 rounded-md transition-colors hover:bg-yellow-500/10"
+                              style={{ color: "#fbbf24" }}
+                            >
+                              <Mail size={14} />
+                            </button>
+                          )}
                           <button
                             title="WhatsApp"
                             onClick={(e) => {
@@ -316,14 +404,24 @@ export default function MedicosPage() {
                               ["Teléfono", m.telefono || "—"],
                               ["Tipo documento", m.tipo_documento || "—"],
                               ["Número documento", m.numero_documento || m.dni || "—"],
-                              ["Matrícula", m.matricula || "—"],
+                              ["Matricula", matriculaDisplay(m)],
                               ["Especialidad", m.especialidad || "—"],
                               ["Dirección", m.direccion || "—"],
                               ["Provincia", m.provincia || "—"],
                               ["Localidad", m.localidad || "—"],
+                              ["Estado", estado.label],
+                              ["Perfil completo", m.perfil_completo ? "Si" : "No"],
+                              [
+                                "Recordatorios",
+                                `${m.perfil_recordatorio_step || 0}/3 · ${
+                                  m.perfil_recordatorio_ultimo_at
+                                    ? new Date(m.perfil_recordatorio_ultimo_at).toLocaleString("es-AR")
+                                    : "sin envios"
+                                }`,
+                              ],
                               ["Aceptó términos", m.acepta_terminos ? "Sí" : "No"],
                               ["Acceso", m.validado ? "Habilitado" : "Bloqueado"],
-                              ["Matrícula validada", m.matricula_validada ? "Sí" : "No"],
+                              ["Matricula validada", m.matricula_validada ? "Si" : "No"],
                               [
                                 "Registrado",
                                 m.created_at
@@ -419,7 +517,7 @@ export default function MedicosPage() {
                   <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>{label}</label>
                   <input
                     className="field-input"
-                    value={(editarMedico as any)[key] || ""}
+                    value={String((editarMedico as Record<string, unknown>)[key] || "")}
                     onChange={(e) => setEditarMedico({ ...editarMedico, [key]: e.target.value })}
                   />
                 </div>
