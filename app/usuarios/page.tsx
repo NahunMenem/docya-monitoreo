@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ChevronUp,
   Mail,
+  MessageCircle,
   Search,
   ShieldCheck,
   Trash2,
@@ -45,6 +46,13 @@ export type Usuario = {
   fecha_aceptacion?: string | null;
   version_texto?: string | null;
 };
+
+function whatsappUrl(telefono?: string | null): string | null {
+  if (!telefono) return null;
+  const clean = telefono.replace(/\D/g, "");
+  if (!clean) return null;
+  return `https://wa.me/${clean}`;
+}
 
 function formatDate(value?: string | null) {
   if (!value) return "—";
@@ -391,6 +399,19 @@ export default function UsuariosPage() {
                         </td>
                         <td>
                           <div className="flex items-center gap-2">
+                            {whatsappUrl(u.telefono) && (
+                              <a
+                                href={whatsappUrl(u.telefono)!}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="btn-ghost !px-3 !py-2"
+                                title="Escribir por WhatsApp"
+                                style={{ color: "#25d366", borderColor: "rgba(37,211,102,0.22)" }}
+                              >
+                                <MessageCircle size={15} />
+                              </a>
+                            )}
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
