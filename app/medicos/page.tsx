@@ -182,8 +182,8 @@ export default function MedicosPage() {
   const totalMedicos = medicos.filter((m) => m.tipo === "medico").length;
   const totalEnfermeros = medicos.filter((m) => m.tipo === "enfermero").length;
   const totalOnline = medicos.filter((m) => isOnline(m.ultimo_ping)).length;
-  const totalValidados = medicos.filter((m) => m.perfil_completo && m.matricula_validada && m.validado).length;
-  const totalIncompletos = medicos.filter((m) => !m.perfil_completo).length;
+  const totalValidados = medicos.filter((m) => m.matricula_validada && m.validado).length;
+  const totalIncompletos = medicos.filter((m) => !m.perfil_completo && !m.matricula_validada).length;
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
