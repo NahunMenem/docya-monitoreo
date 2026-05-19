@@ -235,7 +235,91 @@ export default function ConsultasPage() {
             </div>
           </div>
 
-          <div className="overflow-x-auto">
+          {/* Mobile cards */}
+          <div className="md:hidden divide-y" style={{ borderColor: "var(--border-subtle)" }}>
+            {filtradas.map((c) => {
+              const est = estadoConfig[c.estado] || { label: c.estado, badgeClass: "badge-teal" };
+              const esEnfermeria = (c.tipo || "").toLowerCase().includes("enfer");
+              const esTeleconsulta = (c.canal_atencion || "").toLowerCase() === "teleconsulta";
+              return (
+                <div key={c.id} className="p-4 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs" style={{ color: "var(--text-muted)" }}>#{c.id}</span>
+                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                        {format(new Date(c.creado_en), "dd/MM/yy HH:mm", { locale: es })}
+                      </span>
+                    </div>
+                    <span className={`badge ${est.badgeClass}`}>{est.label}</span>
+                  </div>
+
+                  <p className="font-semibold" style={{ color: "var(--text-primary)" }}>{c.paciente}</p>
+
+                  <p className="text-sm" style={{ color: "var(--text-secondary)" }}>
+                    {c.profesional || "Sin profesional"}
+                  </p>
+
+                  {c.motivo && (
+                    <p className="text-xs line-clamp-2" style={{ color: "var(--text-muted)" }}>{c.motivo}</p>
+                  )}
+
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className={`badge ${esTeleconsulta ? "badge-blue" : "badge-teal"}`}>
+                      {esTeleconsulta ? "Teleconsulta" : "Domicilio"}
+                    </span>
+                    <span className={`badge ${esEnfermeria ? "badge-blue" : "badge-teal"}`}>
+                      {esEnfermeria ? "Enfermería" : "Médica"}
+                    </span>
+                    {c.metodo_pago && (
+                      <span className="badge badge-yellow capitalize">{c.metodo_pago}</span>
+                    )}
+                  </div>
+
+                  {c.direccion && (
+                    <p className="text-xs truncate" style={{ color: "var(--text-muted)" }}>{c.direccion}</p>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex gap-3 text-xs" style={{ color: "var(--text-muted)" }}>
+                      {c.tiempo_llegada_min != null && <span>Llegada: {c.tiempo_llegada_min}m</span>}
+                      {c.duracion_atencion_min != null && <span>Duración: {c.duracion_atencion_min}m</span>}
+                    </div>
+                    {eliminarId === c.id ? (
+                      <div className="flex gap-1">
+                        <button
+                          onClick={() => eliminarConsulta(c.id)}
+                          className="px-2 py-1 rounded text-xs font-medium"
+                          style={{ background: "rgba(239,68,68,0.15)", color: "#f87171", border: "1px solid rgba(239,68,68,0.3)" }}
+                        >
+                          Confirmar
+                        </button>
+                        <button onClick={() => setEliminarId(null)} className="btn-ghost px-2 py-1 text-xs">
+                          Cancelar
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setEliminarId(c.id)}
+                        className="p-1.5 rounded-md transition-colors"
+                        style={{ color: "var(--text-muted)" }}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {filtradas.length === 0 && (
+              <div className="py-12 text-center" style={{ color: "var(--text-muted)" }}>
+                <Activity size={24} className="mx-auto mb-2 opacity-40" />
+                <p className="text-sm">No hay consultas para mostrar</p>
+              </div>
+            )}
+          </div>
+
+          {/* Desktop table */}
+          <div className="hidden md:block overflow-x-auto">
             <table className="data-table">
               <thead>
                 <tr>
