@@ -55,7 +55,7 @@ function matriculaDisplay(m: Medico): string {
 }
 
 function estadoProfesional(m: Medico) {
-  if (!m.perfil_completo) {
+  if (!m.perfil_completo && !m.matricula_validada) {
     return {
       label: "Registro incompleto",
       badge: "badge-yellow",
