@@ -11,6 +11,7 @@ import {
   Clock,
   Truck,
   Home,
+  MessageCircle,
   Trash2,
   Search,
   Filter,
@@ -65,6 +66,7 @@ export default function ConsultasPage() {
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
   const [eliminarId, setEliminarId] = useState<number | null>(null);
+  const [copiadoId, setCopiadoId] = useState<number | null>(null);
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [total, setTotal] = useState(0);
@@ -118,6 +120,50 @@ export default function ConsultasPage() {
     } finally {
       setEliminarId(null);
     }
+  };
+
+  const armarMensajeWhatsapp = (consulta: Consulta) => {
+    const tipoLower = (consulta.tipo || "").toLowerCase();
+    const canalLower = (consulta.canal_atencion || "domicilio").toLowerCase();
+    const esEnfermeria = tipoLower.includes("enfer");
+    const esTeleconsulta = canalLower === "teleconsulta";
+    const tipoLabel = esEnfermeria ? "Enfermero/a" : "Medico";
+    const canalLabel = esTeleconsulta ? "Teleconsulta" : "Domicilio";
+    const fecha = consulta.creado_en
+      ? format(new Date(consulta.creado_en), "dd/MM/yy HH:mm", { locale: es })
+      : "-";
+    const mapsUrl = consulta.direccion
+      ? `https://maps.google.com/?q=${encodeURIComponent(consulta.direccion)}`
+      : "Sin direccion";
+
+    return [
+      "Nueva consulta disponible - DocYa",
+      "",
+      `Consulta #${consulta.id} | ${tipoLabel} | ${canalLabel}`,
+      `Paciente: ${consulta.paciente || "N/D"}`,
+      `Fecha: ${fecha}`,
+      `Direccion: ${consulta.direccion || "N/D"}`,
+      `Mapa: ${mapsUrl}`,
+      `Motivo: ${consulta.motivo || "Sin motivo informado"}`,
+      `Pago: ${consulta.metodo_pago || "N/D"}`,
+      `Estado: ${estadoConfig[consulta.estado]?.label || consulta.estado}`,
+      "",
+      "Puede tomar esta consulta? Avisame por WhatsApp."
+    ].join("\n");
+  };
+
+  const enviarWhatsappConsulta = async (consulta: Consulta) => {
+    const mensaje = armarMensajeWhatsapp(consulta);
+    try {
+      await navigator.clipboard.writeText(mensaje);
+      setCopiadoId(consulta.id);
+      window.setTimeout(() => {
+        setCopiadoId((actual) => (actual === consulta.id ? null : actual));
+      }, 1800);
+    } catch {
+      alert("No se pudo copiar el mensaje");
+    }
+    window.open(`https://wa.me/?text=${encodeURIComponent(mensaje)}`, "_blank", "noopener,noreferrer");
   };
 
   const kpiMap = useMemo(() => {
@@ -298,13 +344,23 @@ export default function ConsultasPage() {
                         </button>
                       </div>
                     ) : (
-                      <button
-                        onClick={() => setEliminarId(c.id)}
-                        className="p-1.5 rounded-md transition-colors"
-                        style={{ color: "var(--text-muted)" }}
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          title={copiadoId === c.id ? "Mensaje copiado" : "Copiar mensaje y abrir WhatsApp"}
+                          onClick={() => enviarWhatsappConsulta(c)}
+                          className="p-1.5 rounded-md transition-colors"
+                          style={{ color: copiadoId === c.id ? "var(--brand-primary)" : "#4ade80" }}
+                        >
+                          <MessageCircle size={14} />
+                        </button>
+                        <button
+                          onClick={() => setEliminarId(c.id)}
+                          className="p-1.5 rounded-md transition-colors"
+                          style={{ color: "var(--text-muted)" }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -373,15 +429,28 @@ export default function ConsultasPage() {
                             </button>
                           </div>
                         ) : (
-                          <button
-                            onClick={() => setEliminarId(c.id)}
-                            className="p-1.5 rounded-md transition-colors"
-                            style={{ color: "var(--text-muted)" }}
-                            onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
-                            onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
-                          >
-                            <Trash2 size={14} />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              title={copiadoId === c.id ? "Mensaje copiado" : "Copiar mensaje y abrir WhatsApp"}
+                              onClick={() => enviarWhatsappConsulta(c)}
+                              className="p-1.5 rounded-md transition-colors"
+                              style={{ color: copiadoId === c.id ? "var(--brand-primary)" : "#4ade80" }}
+                              onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(34,197,94,0.1)")}
+                              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                            >
+                              <MessageCircle size={14} />
+                            </button>
+                            <button
+                              title="Eliminar consulta"
+                              onClick={() => setEliminarId(c.id)}
+                              className="p-1.5 rounded-md transition-colors"
+                              style={{ color: "var(--text-muted)" }}
+                              onMouseEnter={(e) => (e.currentTarget.style.color = "#f87171")}
+                              onMouseLeave={(e) => (e.currentTarget.style.color = "var(--text-muted)")}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
