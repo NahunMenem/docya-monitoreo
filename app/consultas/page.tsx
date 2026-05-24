@@ -246,7 +246,7 @@ export default function ConsultasPage() {
             <table className="data-table">
               <thead>
                 <tr>
-                  {["ID", "Fecha", "Estado", "Paciente", "Motivo", "Profesional", "Canal", "Tipo consulta", "Pago", "Direccion", "Llegada", "Duracion", "Calificación", ""].map((header) => (
+                  {["ID", "Fecha", "Estado", "Paciente", "Motivo", "Profesional", "Canal", "Tipo consulta", "Pago", "Direccion", "Llegada", "Duracion", ""].map((header) => (
                     <th key={header}>{header}</th>
                   ))}
                 </tr>
@@ -266,7 +266,12 @@ export default function ConsultasPage() {
                       <td className="max-w-[220px] min-w-[180px] text-xs" title={consulta.motivo || "Sin motivo informado"}>
                         <span className="line-clamp-2">{consulta.motivo || "Sin motivo informado"}</span>
                       </td>
-                      <td>{consulta.profesional || "-"}</td>
+                      <td>
+                        <div className="flex flex-col gap-0.5">
+                          <span>{consulta.profesional || "-"}</span>
+                          {consulta.puntaje != null && <ConsultaStars puntaje={consulta.puntaje} />}
+                        </div>
+                      </td>
                       <td>
                         <span className={`badge ${esTeleconsulta ? "badge-blue" : "badge-teal"}`}>
                           {esTeleconsulta ? "Teleconsulta" : "Domicilio"}
@@ -281,7 +286,6 @@ export default function ConsultasPage() {
                       <td className="max-w-[180px] truncate text-xs" title={consulta.direccion || ""}>{consulta.direccion || "-"}</td>
                       <td className="text-center">{consulta.tiempo_llegada_min != null ? `${consulta.tiempo_llegada_min}m` : "-"}</td>
                       <td className="text-center">{consulta.duracion_atencion_min != null ? `${consulta.duracion_atencion_min}m` : "-"}</td>
-                      <td><ConsultaStars puntaje={consulta.puntaje} /></td>
                       <td>
                         {deleteId === consulta.id ? (
                           <div className="flex gap-1">
