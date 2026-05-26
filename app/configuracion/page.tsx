@@ -32,12 +32,12 @@ type ComisionConfig = {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const TIPO_LABELS: Record<string, string> = {
-  diurna: "Médico – Diurna (06:00–22:00)",
-  nocturna: "Médico – Nocturna (22:00–06:00)",
-  diurna_enfermero: "Enfermero – Diurna (06:00–22:00)",
-  nocturna_enfermero: "Enfermero – Nocturna (22:00–06:00)",
-  teleconsulta_diurna: "Teleconsulta - Diurna (06:00-22:00)",
-  teleconsulta_nocturna: "Teleconsulta - Nocturna (22:00-06:00)",
+  diurna: "Médico – Diurna (07:00–20:00)",
+  nocturna: "Médico – Nocturna (20:00–07:00)",
+  diurna_enfermero: "Enfermero – Diurna (07:00–20:00)",
+  nocturna_enfermero: "Enfermero – Nocturna (20:00–07:00)",
+  teleconsulta_diurna: "Teleconsulta - Diurna (07:00-20:00)",
+  teleconsulta_nocturna: "Teleconsulta - Nocturna (20:00-07:00)",
 };
 
 function authHeaders() {
