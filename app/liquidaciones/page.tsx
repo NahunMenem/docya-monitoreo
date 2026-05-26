@@ -171,15 +171,13 @@ function ModalRegistrarMovimiento({
     setLoading(true);
     setError("");
     try {
-      const res = await fetch(`${API}/admin/liquidaciones/registrar`, {
+      const res = await fetch(`${API}/medicos/${prof.id}/liquidar`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({
-          medico_id: prof.id,
-          monto: signedAmount,
+          monto_pagado: signedAmount,
           periodo_inicio: periodoInicio,
           periodo_fin: periodoFin,
-          operacion,
         }),
       });
       if (!res.ok) {
