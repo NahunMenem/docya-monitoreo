@@ -31,6 +31,7 @@ type Profesional = {
   tipo: string;
   alias_cbu: string;
   saldo: number;
+  telefono?: string;
   domicilio_cantidad: number;
   domicilio_neto: number;
   domicilio_comision: number;
@@ -141,11 +142,65 @@ function liquidacionDetalle(prof: Profesional, comisionPorcentaje = 20) {
   };
 }
 
+function generarMensajeWsp(
+  prof: Profesional,
+  monto: string,
+  periodoInicio: string,
+  periodoFin: string,
+  isComision: boolean,
+  comisionPorcentaje: number
+): string {
+  const detalle = liquidacionDetalle(prof, comisionPorcentaje);
+  const montoNum = Math.abs(Number(monto || 0));
+  const fmt = (n: number) => "$" + Math.round(Math.abs(n)).toLocaleString("es-AR");
+  const fmtD = (s: string) => {
+    if (!s) return "";
+    const [y, m, d] = s.split("-");
+    return `${d}/${m}/${y}`;
+  };
+
+  if (isComision) {
+    return (
+      `Hola ${prof.nombre.split(" ")[0]}! 👋\n\n` +
+      `DocYa recibió tu regularización de comisión.\n\n` +
+      `💰 Monto regularizado: ${fmt(montoNum)}\n` +
+      `📅 Período: ${fmtD(periodoInicio)} al ${fmtD(periodoFin)}\n\n` +
+      `¡Gracias por mantener la cuenta al día! ✅`
+    );
+  }
+
+  let detalleTxt = "";
+  if (detalle.efectivoBruto > 0) {
+    detalleTxt += `🏠 Efectivo cobrado al paciente: ${fmt(detalle.efectivoBruto)}\n`;
+    detalleTxt += `   Comisión DocYa ${comisionPorcentaje}%: -${fmt(detalle.efectivoComision)}\n`;
+    detalleTxt += `   Neto por efectivo: ${fmt(detalle.efectivoNeto)}\n`;
+  }
+  if (detalle.appNeto > 0) {
+    detalleTxt += `💳 Pagos por app (neto): ${fmt(detalle.appNeto)}\n`;
+  }
+  if (detalle.teleNeto > 0) {
+    detalleTxt += `📹 Teleconsultas (neto): ${fmt(detalle.teleNeto)}\n`;
+  }
+
+  return (
+    `Hola ${prof.nombre.split(" ")[0]}! 👋\n\n` +
+    `DocYa te está transfiriendo el siguiente pago:\n\n` +
+    `💰 *Monto transferido: ${fmt(montoNum)}*\n` +
+    `📅 Período: ${fmtD(periodoInicio)} al ${fmtD(periodoFin)}\n\n` +
+    (detalleTxt ? `📊 Desglose del período:\n${detalleTxt}\n` : "") +
+    `✅ Resultado del período: ${fmt(detalle.saldoPeriodo)}\n` +
+    `💸 Saldo que te transferimos: ${fmt(montoNum)}\n\n` +
+    (prof.alias_cbu ? `🏦 CBU/Alias: ${prof.alias_cbu}\n\n` : "") +
+    `¡Gracias por ser parte de DocYa! 🩺`
+  );
+}
+
 function ModalRegistrarMovimiento({
-  prof, operacion, onClose, onDone,
+  prof, operacion, comisionPorcentaje, onClose, onDone,
 }: {
   prof: Profesional;
   operacion: Operacion;
+  comisionPorcentaje: number;
   onClose: () => void;
   onDone: () => void;
 }) {
@@ -160,6 +215,7 @@ function ModalRegistrarMovimiento({
   const [monto, setMonto] = useState(String(Math.round(saldoAbs)));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
 
   const title = isComision ? "Marcar regularizacion recibida" : "Registrar pago al profesional";
   const description = isComision
@@ -169,6 +225,21 @@ function ModalRegistrarMovimiento({
   const signedAmount = isComision
     ? -Math.abs(Number(monto || 0))
     : Math.abs(Number(monto || 0));
+
+  const mensaje = generarMensajeWsp(prof, monto, periodoInicio, periodoFin, isComision, comisionPorcentaje);
+
+  const telefonoLimpio = (prof.telefono ?? "").replace(/\D/g, "").replace(/^0/, "");
+  const wspPhone = telefonoLimpio.startsWith("54")
+    ? telefonoLimpio
+    : telefonoLimpio.length >= 8 ? `54${telefonoLimpio}` : "";
+  const wspUrl = `https://wa.me/${wspPhone}?text=${encodeURIComponent(mensaje)}`;
+
+  const handleCopiar = () => {
+    navigator.clipboard.writeText(mensaje).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
 
   const handleSubmit = async () => {
     const parsed = Number(monto);
@@ -204,7 +275,7 @@ function ModalRegistrarMovimiento({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
       <div
-        className="w-full max-w-md rounded-2xl p-6"
+        className="w-full max-w-lg rounded-2xl p-6"
         style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}
       >
         <div className="mb-4 flex items-start justify-between">
@@ -266,6 +337,50 @@ function ModalRegistrarMovimiento({
               }}
             />
           </div>
+
+          {/* Preview del mensaje WhatsApp */}
+          <div
+            className="rounded-xl p-3"
+            style={{ background: "rgba(37,211,102,0.07)", border: "1px solid rgba(37,211,102,0.2)" }}
+          >
+            <p className="mb-2 text-xs font-bold uppercase tracking-wide" style={{ color: "#25d366" }}>
+              Vista previa del mensaje
+            </p>
+            <pre
+              className="whitespace-pre-wrap text-xs leading-relaxed"
+              style={{ color: "var(--text-primary)", fontFamily: "inherit" }}
+            >
+              {mensaje}
+            </pre>
+          </div>
+
+          {/* Botones WhatsApp + Copiar */}
+          <div className="grid grid-cols-2 gap-2">
+            <a
+              href={wspUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-bold text-white transition hover:opacity-90"
+              style={{ background: "#25d366" }}
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+              </svg>
+              Enviar por WhatsApp
+            </a>
+            <button
+              onClick={handleCopiar}
+              className="flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-bold transition hover:opacity-80"
+              style={{
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid var(--border-subtle)",
+                color: copied ? "#4ade80" : "var(--text-primary)",
+              }}
+            >
+              {copied ? "✓ Copiado!" : "Copiar mensaje"}
+            </button>
+          </div>
+
           {error && <p className="text-xs font-bold text-red-400">{error}</p>}
           <button
             onClick={handleSubmit}
@@ -658,7 +773,7 @@ export default function LiquidacionesPage() {
   const weekRange = getWeekRange();
   const [profesionales, setProfesionales] = useState<Profesional[]>([]);
   const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState<{ prof: Profesional; operacion: Operacion } | null>(null);
+  const [modal, setModal] = useState<{ prof: Profesional; operacion: Operacion; comisionPct: number } | null>(null);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
   const [query, setQuery] = useState("");
   const [filtro, setFiltro] = useState<Filtro>("todos");
@@ -897,7 +1012,7 @@ export default function LiquidacionesPage() {
               <ProfesionalCard
                 key={p.id}
                 prof={p}
-                onRegistrar={(prof, operacion) => setModal({ prof, operacion })}
+                onRegistrar={(prof, operacion) => setModal({ prof, operacion, comisionPct: comisionPorcentaje })}
                 comisionPorcentaje={comisionPorcentaje}
               />
             ))
@@ -941,6 +1056,7 @@ export default function LiquidacionesPage() {
         <ModalRegistrarMovimiento
           prof={modal.prof}
           operacion={modal.operacion}
+          comisionPorcentaje={modal.comisionPct}
           onClose={() => setModal(null)}
           onDone={() => {
             const okMsg = modal.operacion === "comision_recibida"
