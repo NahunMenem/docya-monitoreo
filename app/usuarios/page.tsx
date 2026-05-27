@@ -1,7 +1,7 @@
 "use client";
 
 import Sidebar from "@/components/sidebar";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -10,6 +10,7 @@ import {
   ChevronUp,
   Mail,
   MessageCircle,
+  Pencil,
   Search,
   ShieldCheck,
   Trash2,
@@ -172,6 +173,146 @@ function ModalNuevoUsuario({
   );
 }
 
+function ModalEditarUsuario({
+  usuario,
+  onClose,
+  onSuccess,
+}: {
+  usuario: Usuario | null;
+  onClose: () => void;
+  onSuccess: () => void;
+}) {
+  const [form, setForm] = useState({
+    full_name: "",
+    email: "",
+    dni: "",
+    telefono: "",
+    pais: "",
+    provincia: "",
+    localidad: "",
+    fecha_nacimiento: "",
+    sexo: "",
+    tipo_documento: "",
+    numero_documento: "",
+    direccion: "",
+    role: "patient",
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!usuario) return;
+    setForm({
+      full_name: usuario.full_name || "",
+      email: usuario.email || "",
+      dni: usuario.dni || "",
+      telefono: usuario.telefono || "",
+      pais: usuario.pais || "",
+      provincia: usuario.provincia || "",
+      localidad: usuario.localidad || "",
+      fecha_nacimiento: usuario.fecha_nacimiento ? usuario.fecha_nacimiento.slice(0, 10) : "",
+      sexo: usuario.sexo || "",
+      tipo_documento: usuario.tipo_documento || "",
+      numero_documento: usuario.numero_documento || "",
+      direccion: usuario.direccion || "",
+      role: usuario.role || "patient",
+    });
+    setError(null);
+  }, [usuario]);
+
+  if (!usuario) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/monitoreo/usuarios/${usuario.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...form,
+          fecha_nacimiento: form.fecha_nacimiento || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) {
+        throw new Error(data?.detail || data?.error || "No se pudo guardar el usuario");
+      }
+      onSuccess();
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo guardar el usuario");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fields = [
+    { key: "full_name", label: "Nombre completo", type: "text" },
+    { key: "email", label: "Email", type: "email" },
+    { key: "telefono", label: "Telefono", type: "tel" },
+    { key: "dni", label: "DNI", type: "text" },
+    { key: "tipo_documento", label: "Tipo documento", type: "text" },
+    { key: "numero_documento", label: "Numero documento", type: "text" },
+    { key: "pais", label: "Pais", type: "text" },
+    { key: "provincia", label: "Provincia", type: "text" },
+    { key: "localidad", label: "Localidad", type: "text" },
+    { key: "direccion", label: "Direccion", type: "text" },
+    { key: "sexo", label: "Sexo", type: "text" },
+    { key: "role", label: "Rol", type: "text" },
+    { key: "fecha_nacimiento", label: "Fecha nacimiento", type: "date" },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: "rgba(4, 21, 28, 0.88)", backdropFilter: "blur(10px)" }}
+      onClick={onClose}
+    >
+      <div
+        className="glass-card max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="font-semibold text-lg mb-5" style={{ color: "var(--text-primary)" }}>
+          Editar usuario
+        </h2>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            {fields.map(({ key, label, type }) => (
+              <div key={key}>
+                <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>
+                  {label}
+                </label>
+                <input
+                  type={type}
+                  className="field-input"
+                  value={(form as Record<string, string>)[key]}
+                  onChange={(e) => setForm({ ...form, [key]: e.target.value })}
+                  required={key === "full_name" || key === "email"}
+                />
+              </div>
+            ))}
+          </div>
+          {error && (
+            <p className="text-sm" style={{ color: "#f87171" }}>
+              {error}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={onClose} className="btn-ghost" disabled={loading}>
+              Cancelar
+            </button>
+            <button type="submit" disabled={loading} className="btn-primary">
+              {loading ? "Guardando..." : "Guardar cambios"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 function ProviderBadge({ user }: { user: Usuario }) {
   const isGoogle = user.auth_provider === "google" || !!user.google_id;
   return (
@@ -203,18 +344,19 @@ export default function UsuariosPage() {
   const [pages, setPages] = useState(1);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [expandedUserId, setExpandedUserId] = useState<string | null>(null);
+  const [editingUser, setEditingUser] = useState<Usuario | null>(null);
 
-  const fetchUsuarios = async () => {
+  const fetchUsuarios = useCallback(async () => {
     const query = encodeURIComponent(search.trim());
     const res = await fetch(`${API}/monitoreo/usuarios?page=${page}&limit=15&q=${query}`);
     const data = await res.json();
     setUsuarios(data.usuarios || []);
     setPages(data.pages || 1);
-  };
+  }, [page, search]);
 
   useEffect(() => {
     fetchUsuarios();
-  }, [page, search]);
+  }, [fetchUsuarios]);
 
   useEffect(() => {
     setPage(1);
@@ -399,6 +541,17 @@ export default function UsuariosPage() {
                         </td>
                         <td>
                           <div className="flex items-center gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingUser(u);
+                              }}
+                              disabled={busyId === u.id}
+                              className="btn-ghost !px-3 !py-2"
+                              title="Editar usuario"
+                            >
+                              <Pencil size={15} />
+                            </button>
                             {whatsappUrl(u.telefono) && (
                               <a
                                 href={whatsappUrl(u.telefono)!}
@@ -559,6 +712,11 @@ export default function UsuariosPage() {
           setPage(1);
           fetchUsuarios();
         }}
+      />
+      <ModalEditarUsuario
+        usuario={editingUser}
+        onClose={() => setEditingUser(null)}
+        onSuccess={fetchUsuarios}
       />
     </div>
   );
