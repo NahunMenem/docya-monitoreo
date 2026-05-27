@@ -450,16 +450,6 @@ function ProfesionalCard({
                 : "Sin saldo"
           }
         />
-        {false && (
-        <InfoLine
-          label="Saldo actual registrado"
-          value={
-            prof.ultima_liquidacion
-              ? `${fmtDate(prof.ultima_liquidacion)} · ${pesosConSigno(prof.ultimo_monto ?? 0)}`
-              : "Sin movimientos"
-          }
-        />
-        )}
       </div>
       <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
         Cuenta rapida: DocYa debe transferir app/tele ({pesos(detalle.creditoDocya)}) menos la comision del efectivo que cobro el profesional ({pesos(detalle.deudaEfectivo)}). El saldo actual puede cambiar por pagos o regularizaciones ya registrados.
