@@ -102,6 +102,10 @@ function estadoProfesional(m: Medico) {
   };
 }
 
+function estaHabilitado(m: Medico): boolean {
+  return estadoProfesional(m).label === "Habilitado";
+}
+
 function ReputationStars({
   promedio = 0,
   total = 0,
@@ -242,7 +246,7 @@ export default function MedicosPage() {
   const totalMedicos = medicos.filter((m) => m.tipo === "medico").length;
   const totalEnfermeros = medicos.filter((m) => m.tipo === "enfermero").length;
   const totalOnline = medicos.filter((m) => isOnline(m.ultimo_ping)).length;
-  const totalValidados = medicos.filter((m) => m.perfil_completo && m.matricula_validada && m.validado).length;
+  const totalValidados = medicos.filter(estaHabilitado).length;
   const totalIncompletos = medicos.filter((m) => !m.perfil_completo).length;
 
   return (
