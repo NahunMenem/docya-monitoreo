@@ -91,6 +91,10 @@ function pesos(n: number) {
 function pesosConSigno(n: number) {
   return n < 0 ? `-${pesos(n)}` : pesos(n);
 }
+function pesosBalance(n: number) {
+  if (n === 0) return "$0";
+  return n < 0 ? `-${pesos(n)}` : pesos(n);
+}
 function fmtDate(s: string | null) {
   if (!s) return "-";
   return new Date(s).toLocaleDateString("es-AR", {
@@ -119,6 +123,9 @@ function liquidacionDetalle(prof: Profesional, comisionPorcentaje = 20) {
   const teleComision = prof.tele_comision ?? 0;
   const saldoDisponible = Math.max(prof.saldo, 0);
   const saldoRegularizar = Math.max(-prof.saldo, 0);
+  const creditoDocya = appNeto + teleNeto;
+  const deudaEfectivo = efectivoComision;
+  const saldoPeriodo = creditoDocya - deudaEfectivo;
   const compensadoORegularizado = Math.max(efectivoComision - saldoRegularizar, 0);
   const totalProfesional = efectivoNeto + appNeto + teleNeto;
   const totalComision = efectivoComision + appComision + teleComision;
@@ -128,6 +135,7 @@ function liquidacionDetalle(prof: Profesional, comisionPorcentaje = 20) {
     appBruto, appNeto, appComision,
     teleNeto, teleComision,
     saldoDisponible, saldoRegularizar,
+    creditoDocya, deudaEfectivo, saldoPeriodo,
     compensadoORegularizado,
     totalProfesional, totalComision,
   };
@@ -291,7 +299,6 @@ function ProfesionalCard({
   const isPagarProfesional = prof.saldo > 0;
   const isCero = prof.saldo === 0;
 
-  const efectivoCantidad = prof.domicilio_efectivo_cantidad ?? 0;
   const appCantidad = prof.domicilio_app_cantidad ?? 0;
   const labelPlural = consultaLabel(prof.tipo);
   const esMedico = prof.tipo?.toLowerCase() !== "enfermero";
@@ -370,27 +377,27 @@ function ProfesionalCard({
             icon={Home}
             label="Efectivo cobrado"
             value={pesos(detalle.efectivoBruto)}
-            detail={`${efectivoCantidad} ${labelPlural}`}
+            detail={`Lo cobro el profesional`}
           />
           <MiniMetric
             icon={Wallet}
-            label="App neto"
-            value={pesos(detalle.appNeto)}
-            detail={`${appCantidad} pagos app`}
+            label="A favor app/tele"
+            value={pesos(detalle.creditoDocya)}
+            detail="DocYa lo tiene que transferir"
             tone="blue"
           />
           <MiniMetric
             icon={ReceiptText}
-            label="Comision DocYa"
-            value={pesos(detalle.totalComision)}
-            detail={`${comisionPorcentaje.toLocaleString("es-AR")}% generado`}
+            label="Debe por efectivo"
+            value={pesos(detalle.deudaEfectivo)}
+            detail="Comision que debe a DocYa"
             tone="yellow"
           />
           <MiniMetric
             icon={isPagarProfesional ? ArrowUpFromLine : isCobrarComision ? ArrowDownToLine : BadgeCheck}
-            label={isPagarProfesional ? "Disponible para pagar" : isCobrarComision ? "Saldo a regularizar" : "Al dia"}
+            label={isPagarProfesional ? "Saldo actual a pagar" : isCobrarComision ? "Saldo a regularizar" : "Al dia"}
             value={pesos(isPagarProfesional ? detalle.saldoDisponible : detalle.saldoRegularizar)}
-            detail={isPagarProfesional ? "Transferir al profesional" : isCobrarComision ? "Debe a DocYa" : "Saldo en cero"}
+            detail={isPagarProfesional ? "Despues de movimientos" : isCobrarComision ? "Debe a DocYa" : "Saldo en cero"}
             tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
           />
         </div>
@@ -430,18 +437,33 @@ function ProfesionalCard({
         className="mt-4 grid gap-3 rounded-xl p-3 md:grid-cols-4"
         style={{ background: "var(--input-bg)" }}
       >
-        <InfoLine label="Neto por efectivo" value={pesos(detalle.efectivoNeto)} />
-        <InfoLine label="Neto por app" value={pesos(detalle.appNeto)} />
-        <InfoLine label="Neto teleconsultas" value={pesos(detalle.teleNeto)} />
+        <InfoLine label="Cuenta del periodo" value={pesosBalance(detalle.saldoPeriodo)} />
+        <InfoLine label="A favor profesional" value={pesos(detalle.creditoDocya)} />
+        <InfoLine label="Menos deuda efectivo" value={`-${pesos(detalle.deudaEfectivo)}`} />
         <InfoLine
-          label="Ultimo movimiento"
+          label="Saldo actual registrado"
+          value={
+            isPagarProfesional
+              ? `${pesos(detalle.saldoDisponible)} a pagar`
+              : isCobrarComision
+                ? `${pesos(detalle.saldoRegularizar)} a cobrar`
+                : "Sin saldo"
+          }
+        />
+        {false && (
+        <InfoLine
+          label="Saldo actual registrado"
           value={
             prof.ultima_liquidacion
               ? `${fmtDate(prof.ultima_liquidacion)} · ${pesosConSigno(prof.ultimo_monto ?? 0)}`
               : "Sin movimientos"
           }
         />
+        )}
       </div>
+      <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
+        Cuenta rapida: DocYa debe transferir app/tele ({pesos(detalle.creditoDocya)}) menos la comision del efectivo que cobro el profesional ({pesos(detalle.deudaEfectivo)}). El saldo actual puede cambiar por pagos o regularizaciones ya registrados.
+      </p>
 
       <div className="mt-3 grid gap-3 lg:grid-cols-4">
         <BreakdownPanel
@@ -473,7 +495,7 @@ function ProfesionalCard({
         />
         <BreakdownPanel
           title="Teleconsultas"
-          subtitle="Consultas por video realizadas."
+          subtitle="DocYa cobro estas consultas y debe transferir el neto."
           rows={[
             [`${teleCantidad} teleconsulta${teleCantidad !== 1 ? "s" : ""}`, ""],
             ["Neto profesional", pesos(detalle.teleNeto)],
@@ -482,11 +504,19 @@ function ProfesionalCard({
           tone="purple"
         />
         <BreakdownPanel
-          title="Saldo final"
-          subtitle="Resultado despues de compensar movimientos."
+          title="Cuenta clara"
+          subtitle="Lo que se suma y resta para entender el pago."
           rows={[
-            ["Disponible para transferir", pesos(detalle.saldoDisponible)],
-            ["Pendiente de regularizar", pesos(detalle.saldoRegularizar)],
+            ["A favor por app + tele", pesos(detalle.creditoDocya)],
+            ["Menos comision de efectivo", `-${pesos(detalle.deudaEfectivo)}`],
+            ["Resultado del periodo", pesosBalance(detalle.saldoPeriodo)],
+            ["Saldo actual registrado", pesosBalance(prof.saldo)],
+            [
+              "Ultimo movimiento",
+              prof.ultima_liquidacion
+                ? `${fmtDate(prof.ultima_liquidacion)} ${pesosConSigno(prof.ultimo_monto ?? 0)}`
+                : "Sin movimientos",
+            ],
             ["Total ganado profesional", pesos(detalle.totalProfesional)],
           ]}
           tone={isCobrarComision ? "red" : isPagarProfesional ? "teal" : "green"}
@@ -718,7 +748,7 @@ export default function LiquidacionesPage() {
   const totalTele = profesionales.reduce((a, p) => a + (p.tele_cantidad ?? 0), 0);
   const totalComisionGenerada = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).totalComision, 0);
   const totalEfectivoBruto = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).efectivoBruto, 0);
-  const totalAppNeto = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).appNeto, 0);
+  const totalCreditoDocya = profesionales.reduce((a, p) => a + liquidacionDetalle(p, comisionPorcentaje).creditoDocya, 0);
 
   const filtrosSaldo: { id: Filtro; label: string }[] = [
     { id: "todos", label: "Todos" },
@@ -749,7 +779,7 @@ export default function LiquidacionesPage() {
               Liquidaciones y comisiones
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
-              Administra pagos a profesionales y comisiones DocYa por consultas cobradas en efectivo.
+              Administra que le debe DocYa al profesional y que comision debe regularizar el profesional cuando cobro en efectivo.
             </p>
           </div>
           <button
@@ -770,7 +800,7 @@ export default function LiquidacionesPage() {
             helper={`${conPago} profesionales con transferencia pendiente`} />
           <SummaryCard icon={ReceiptText} label="Cobrado en efectivo" value={pesos(totalEfectivoBruto)} color="#60a5fa"
             helper="Dinero que recibieron directo los profesionales" />
-          <SummaryCard icon={BadgeCheck} label="Neto por app" value={pesos(totalAppNeto)} color="#a78bfa"
+          <SummaryCard icon={BadgeCheck} label="A favor app/tele" value={pesos(totalCreditoDocya)} color="#a78bfa"
             helper={`${totalConsultas} total · ${totalTele} teleconsultas · comision ${pesos(totalComisionGenerada)}`} />
         </section>
 
