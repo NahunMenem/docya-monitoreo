@@ -174,7 +174,7 @@ export default function MedicosPage() {
     () =>
       medicos.filter((m) => {
         const matchTipo = tipoFiltro === "todos" || m.tipo === tipoFiltro;
-        const matchSearch = `${m.full_name} ${m.email} ${m.matricula} ${m.especialidad}`
+        const matchSearch = `${m.id} ${m.full_name} ${m.email} ${m.matricula} ${m.especialidad}`
           .toLowerCase()
           .includes(search.toLowerCase());
         return matchTipo && matchSearch;
@@ -346,6 +346,7 @@ export default function MedicosPage() {
               <thead>
                 <tr>
                   {[
+                    "ID",
                     "Profesional",
                     "Tipo",
                     "Especialidad",
@@ -374,6 +375,9 @@ export default function MedicosPage() {
                           setExpandedMedicoId((current) => (current === m.id ? null : m.id))
                         }
                       >
+                        <td className="font-mono text-xs" style={{ color: "var(--brand-primary-light)" }}>
+                          #{m.id}
+                        </td>
                         <td>
                           <div className="flex items-center gap-3">
                             {m.foto_perfil ? (
@@ -535,9 +539,10 @@ export default function MedicosPage() {
                       </tr>
                       {expandedMedicoId === m.id && (
                         <tr key={`${m.id}-expanded`}>
-                          <td colSpan={10} className="bg-white/5">
+                          <td colSpan={11} className="bg-white/5">
                             <div className="grid gap-4 p-4 md:grid-cols-3">
                               {[
+                                ["ID médico", `#${m.id}`],
                                 ["Email", m.email || "—"],
                                 ["Teléfono", m.telefono || "—"],
                                 ["Tipo documento", m.tipo_documento || "—"],
