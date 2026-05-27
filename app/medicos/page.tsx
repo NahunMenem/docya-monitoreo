@@ -106,6 +106,10 @@ function estaHabilitado(m: Medico): boolean {
   return estadoProfesional(m).label === "Habilitado";
 }
 
+function estaIncompleto(m: Medico): boolean {
+  return estadoProfesional(m).label === "Registro incompleto";
+}
+
 function ReputationStars({
   promedio = 0,
   total = 0,
@@ -247,7 +251,7 @@ export default function MedicosPage() {
   const totalEnfermeros = medicos.filter((m) => m.tipo === "enfermero").length;
   const totalOnline = medicos.filter((m) => isOnline(m.ultimo_ping)).length;
   const totalValidados = medicos.filter(estaHabilitado).length;
-  const totalIncompletos = medicos.filter((m) => !m.perfil_completo).length;
+  const totalIncompletos = medicos.filter(estaIncompleto).length;
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
