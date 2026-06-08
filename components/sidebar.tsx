@@ -17,6 +17,7 @@ import {
   ChevronRight,
   Settings,
   Link2,
+  Landmark,
 } from "lucide-react";
 
 const menu = [
@@ -28,6 +29,7 @@ const menu = [
   { label: "Asignación manual", href: "/asignacion-manual", icon: ClipboardPlus },
   { label: "Liquidaciones", href: "/liquidaciones", icon: Wallet },
   { label: "Referidos", href: "/referidos", icon: Link2 },
+  { label: "Contabilidad", href: "/contabilidad", icon: Landmark },
   { label: "Configuración", href: "/configuracion", icon: Settings },
 ];
 
