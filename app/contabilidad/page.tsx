@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementType } from "react";
 import Sidebar from "@/components/sidebar";
+import LibroConsultas from "./LibroConsultas";
 import {
   AlertTriangle,
   Bell,
+  BookOpen,
   Calculator,
   CalendarClock,
   Check,
@@ -327,7 +329,10 @@ function ObligacionModal({
   );
 }
 
+type Tab = "vencimientos" | "libro";
+
 export default function ContabilidadPage() {
+  const [tab, setTab] = useState<Tab>("vencimientos");
   const [obligaciones, setObligaciones] = useState<Obligacion[]>([]);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState<{ obligacion: Obligacion | null } | null>(null);
@@ -481,34 +486,64 @@ export default function ContabilidadPage() {
               <span className="badge badge-teal">Contabilidad</span>
             </div>
             <h1 className="text-3xl font-black" style={{ color: "var(--text-primary)" }}>
-              Calendario de vencimientos
+              {tab === "vencimientos" ? "Calendario de vencimientos" : "Libro de consultas"}
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
-              Seguimiento de los vencimientos impositivos y contables de DocYa SAS (IVA, cargas sociales,
-              Ingresos Brutos, Ganancias, balance anual). Pensado como recordatorio interno: la presentacion
-              ante ARCA / AGIP la sigue haciendo el contador.
+              {tab === "vencimientos"
+                ? "Seguimiento de los vencimientos impositivos y contables de DocYa SAS (IVA, cargas sociales, Ingresos Brutos, Ganancias, balance anual). Pensado como recordatorio interno: la presentacion ante ARCA / AGIP la sigue haciendo el contador."
+                : "Registro de consultas facturadas, con el calculo automatico de comision DocYa, comision de Mercado Pago e IVA (debito y credito) para estimar cuanto corresponde declarar a ARCA."}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={fetchObligaciones}
-              className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
-              style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
-            >
-              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-              Actualizar
-            </button>
-            <button
-              onClick={() => setModal({ obligacion: null })}
-              className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
-              style={{ background: "var(--brand-primary)", color: "#fff" }}
-            >
-              <Plus size={16} />
-              Nueva obligacion
-            </button>
-          </div>
+          {tab === "vencimientos" && (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={fetchObligaciones}
+                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
+                style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
+              >
+                <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+                Actualizar
+              </button>
+              <button
+                onClick={() => setModal({ obligacion: null })}
+                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
+                style={{ background: "var(--brand-primary)", color: "#fff" }}
+              >
+                <Plus size={16} />
+                Nueva obligacion
+              </button>
+            </div>
+          )}
         </div>
 
+        {/* TABS */}
+        <div className="mb-6 inline-flex rounded-xl p-1" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-subtle)" }}>
+          <button
+            onClick={() => setTab("vencimientos")}
+            className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition"
+            style={tab === "vencimientos"
+              ? { background: "var(--brand-primary)", color: "#fff" }
+              : { color: "var(--text-muted)" }}
+          >
+            <CalendarClock size={15} />
+            Calendario de vencimientos
+          </button>
+          <button
+            onClick={() => setTab("libro")}
+            className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition"
+            style={tab === "libro"
+              ? { background: "var(--brand-primary)", color: "#fff" }
+              : { color: "var(--text-muted)" }}
+          >
+            <BookOpen size={15} />
+            Libro de consultas
+          </button>
+        </div>
+
+        {tab === "libro" && <LibroConsultas />}
+
+        {tab === "vencimientos" && (
+        <>
         {/* DISCLAIMER */}
         <div
           className="mb-6 flex items-start gap-3 rounded-2xl p-4"
@@ -645,6 +680,8 @@ export default function ContabilidadPage() {
               ))}
             </div>
           </section>
+        )}
+        </>
         )}
       </main>
 
