@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Search,
   Sun,
+  TrendingUp,
   Video,
   Wallet,
   X,
@@ -898,15 +899,17 @@ export default function LiquidacionesPage() {
         </div>
 
         {/* SUMMARY CARDS */}
-        <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <SummaryCard icon={ArrowDownToLine} label="Comisiones a cobrar" value={pesos(totalACobrar)} color="#fbbf24"
             helper={`${conComision} profesionales deben transferir a DocYa`} />
           <SummaryCard icon={ArrowUpFromLine} label="Disponible para pagar" value={pesos(totalAPagar)} color="var(--brand-primary-light)"
             helper={`${conPago} profesionales con transferencia pendiente`} />
+          <SummaryCard icon={TrendingUp} label="Ganancia DocYa" value={pesos(totalComisionGenerada)} color="#34d399"
+            helper="Comision generada en el periodo" />
           <SummaryCard icon={ReceiptText} label="Cobrado en efectivo" value={pesos(totalEfectivoBruto)} color="#60a5fa"
             helper="Dinero que recibieron directo los profesionales" />
           <SummaryCard icon={BadgeCheck} label="A favor app/tele" value={pesos(totalCreditoDocya)} color="#a78bfa"
-            helper={`${totalConsultas} total · ${totalTele} teleconsultas · comision ${pesos(totalComisionGenerada)}`} />
+            helper={`${totalConsultas} total · ${totalTele} teleconsultas`} />
         </section>
 
         {/* FILTROS */}
