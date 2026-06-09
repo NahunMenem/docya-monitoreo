@@ -125,6 +125,9 @@ type ResumenIva = {
   iva_debito_total: string;
   comision_mp_neta: string;
   iva_credito_mp: string;
+  agip_base_imponible: string;
+  agip_iibb_pct: string;
+  agip_iibb_estimado: string;
   iva_credito_gastos: string;
   otros_creditos: string;
   percepciones: string;
@@ -769,7 +772,7 @@ export default function ContabilidadPage() {
               <Metric icon={ReceiptText} label="IVA debito" value={money(resumen?.iva_debito_total)} helper="Consultas manuales + comprobantes emitidos" />
               <Metric icon={WalletCards} label="MP absorbido" value={money(resumen?.comision_mp_neta)} helper="Costo DocYa por Mercado Pago 6%" color="#60a5fa" />
               <Metric icon={Calculator} label="Margen DocYa" value={money(resumen?.margen_docya_post_mp)} helper="Comision DocYa menos MP absorbido" color="#fbbf24" />
-              <Metric icon={CheckCircle2} label="Saldo a favor" value={money(resumen?.saldo_a_favor_estimado)} helper="Saldo tecnico negativo del periodo" color="#4ade80" />
+              <Metric icon={Landmark} label="AGIP IIBB" value={money(resumen?.agip_iibb_estimado)} helper={`Sobre DocYa 20% (${Number(resumen?.agip_iibb_pct ?? 0).toLocaleString("es-AR")}%)`} color="#f87171" />
             </div>
 
             <Card className="p-5">
@@ -789,6 +792,7 @@ export default function ContabilidadPage() {
                 <Metric icon={CheckCircle2} label="Medicos 80%" value={money(resumen?.neto_medicos_total)} helper="Importe que corresponde liquidar a profesionales" color="#4ade80" />
                 <Metric icon={Calculator} label="DocYa 20%" value={money(resumen?.comision_docya_neta)} helper="Base que DocYa factura por uso de plataforma" color="var(--brand-primary-light)" />
                 <Metric icon={WalletCards} label="Mercado Pago 6%" value={money(resumen?.comision_mp_neta)} helper={`IVA credito MP ${money(resumen?.iva_credito_mp)}`} color="#60a5fa" />
+                <Metric icon={Landmark} label="AGIP a pagar" value={money(resumen?.agip_iibb_estimado)} helper={`Base imponible ${money(resumen?.agip_base_imponible)}`} color="#f87171" />
                 <Metric icon={FileText} label="Comprobantes" value={resumen?.comprobantes_cantidad ?? 0} helper={`Debito extra ${money(resumen?.iva_debito_comprobantes)}`} />
                 <Metric icon={WalletCards} label="Gastos" value={resumen?.gastos_cantidad ?? 0} helper={`Credito gastos ${money(resumen?.iva_credito_gastos)}`} />
               </div>
