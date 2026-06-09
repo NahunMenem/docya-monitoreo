@@ -5,10 +5,12 @@ import type { ElementType } from "react";
 import Sidebar from "@/components/sidebar";
 import {
   AlertTriangle,
+  Banknote,
   Bell,
   Calculator,
   CalendarClock,
   CheckCircle2,
+  ClipboardCheck,
   Download,
   FileText,
   Landmark,
@@ -25,7 +27,7 @@ import {
 const CONTABILIDAD_API = process.env.NEXT_PUBLIC_CONTABILIDAD_API_BASE!;
 
 type Periodicidad = "mensual" | "anual";
-type Tab = "arca" | "consultas" | "comprobantes" | "gastos" | "vencimientos";
+type Tab = "arca" | "consultas" | "comprobantes" | "gastos" | "caja" | "cierre" | "vencimientos";
 type Tono = "red" | "yellow" | "teal" | "green";
 
 type Obligacion = {
@@ -151,10 +153,46 @@ type AjusteIva = {
   notas: string | null;
 };
 
+type CierreMensual = {
+  periodo: string;
+  consultas_cargadas: boolean;
+  facturas_emitidas: boolean;
+  gastos_cargados: boolean;
+  medicos_liquidados: boolean;
+  iva_revisado: boolean;
+  agip_revisado: boolean;
+  caja_conciliada: boolean;
+  cerrado: boolean;
+  notas: string | null;
+  cerrado_por: string | null;
+  cerrado_en: string | null;
+};
+
+type MovimientoCaja = {
+  id: number;
+  fecha: string;
+  tipo: "ingreso" | "egreso";
+  categoria: string;
+  descripcion: string;
+  monto: string;
+  medio: string | null;
+  referencia: string | null;
+  notas: string | null;
+};
+
+type ResumenCaja = {
+  periodo: string;
+  ingresos: string;
+  egresos: string;
+  saldo: string;
+  movimientos_cantidad: number;
+};
+
 type ObligacionForm = Omit<Obligacion, "id">;
 type ConsultaForm = { fecha: string; medico: string; tipo: string; precio: string };
 type ComprobanteForm = Omit<Comprobante, "id" | "iva_debito" | "importe_total">;
 type GastoForm = Omit<Gasto, "id" | "iva_credito" | "importe_total">;
+type MovimientoCajaForm = Omit<MovimientoCaja, "id">;
 
 const MESES = [
   "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -166,6 +204,8 @@ const tabs: { id: Tab; label: string; icon: ElementType }[] = [
   { id: "consultas", label: "Consultas", icon: ReceiptText },
   { id: "comprobantes", label: "Comprobantes", icon: FileText },
   { id: "gastos", label: "Gastos", icon: WalletCards },
+  { id: "caja", label: "Caja", icon: Banknote },
+  { id: "cierre", label: "Cierre", icon: ClipboardCheck },
   { id: "vencimientos", label: "Vencimientos", icon: CalendarClock },
 ];
 
@@ -338,6 +378,36 @@ function emptyGasto(): GastoForm {
   };
 }
 
+function emptyCierre(periodo: string): CierreMensual {
+  return {
+    periodo,
+    consultas_cargadas: false,
+    facturas_emitidas: false,
+    gastos_cargados: false,
+    medicos_liquidados: false,
+    iva_revisado: false,
+    agip_revisado: false,
+    caja_conciliada: false,
+    cerrado: false,
+    notas: "",
+    cerrado_por: null,
+    cerrado_en: null,
+  };
+}
+
+function emptyMovimientoCaja(): MovimientoCajaForm {
+  return {
+    fecha: todayIso(),
+    tipo: "ingreso",
+    categoria: "Mercado Pago",
+    descripcion: "",
+    monto: "",
+    medio: "Mercado Pago",
+    referencia: "",
+    notas: "",
+  };
+}
+
 async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...(init?.headers ?? {}) } });
   if (!res.ok) {
@@ -454,6 +524,9 @@ export default function ContabilidadPage() {
   const [resumen, setResumen] = useState<ResumenIva | null>(null);
   const [checklist, setChecklist] = useState<ChecklistArca | null>(null);
   const [ajuste, setAjuste] = useState<AjusteIva>({ periodo, otros_creditos: "0", notas: "" });
+  const [cierre, setCierre] = useState<CierreMensual>(emptyCierre(periodo));
+  const [movimientosCaja, setMovimientosCaja] = useState<MovimientoCaja[]>([]);
+  const [resumenCaja, setResumenCaja] = useState<ResumenCaja | null>(null);
 
   const [obligacionForm, setObligacionForm] = useState<ObligacionForm>(emptyObligacion());
   const [editObligacion, setEditObligacion] = useState<Obligacion | null>(null);
@@ -462,6 +535,8 @@ export default function ContabilidadPage() {
   const [editComprobante, setEditComprobante] = useState<Comprobante | null>(null);
   const [gastoForm, setGastoForm] = useState<GastoForm>(emptyGasto());
   const [editGasto, setEditGasto] = useState<Gasto | null>(null);
+  const [movimientoForm, setMovimientoForm] = useState<MovimientoCajaForm>(emptyMovimientoCaja());
+  const [editMovimiento, setEditMovimiento] = useState<MovimientoCaja | null>(null);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
@@ -473,7 +548,7 @@ export default function ContabilidadPage() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [obs, regs, comps, gs, res, chk, aj] = await Promise.all([
+      const [obs, regs, comps, gs, res, chk, aj, cie, movs, caja] = await Promise.all([
         apiJson<ApiObligacion[]>(`${CONTABILIDAD_API}/contabilidad/obligaciones`),
         apiJson<RegistroConsulta[]>(`${CONTABILIDAD_API}/contabilidad/registros-consultas?desde=${range.desde}&hasta=${range.hasta}`),
         apiJson<Comprobante[]>(`${CONTABILIDAD_API}/contabilidad/comprobantes-emitidos?desde=${range.desde}&hasta=${range.hasta}`),
@@ -481,6 +556,9 @@ export default function ContabilidadPage() {
         apiJson<ResumenIva>(`${CONTABILIDAD_API}/contabilidad/resumen-iva/${periodo}`),
         apiJson<ChecklistArca>(`${CONTABILIDAD_API}/contabilidad/arca/checklist/${periodo}`),
         apiJson<AjusteIva>(`${CONTABILIDAD_API}/contabilidad/ajustes-iva/${periodo}`),
+        apiJson<CierreMensual>(`${CONTABILIDAD_API}/contabilidad/cierres/${periodo}`),
+        apiJson<MovimientoCaja[]>(`${CONTABILIDAD_API}/contabilidad/movimientos-caja?desde=${range.desde}&hasta=${range.hasta}`),
+        apiJson<ResumenCaja>(`${CONTABILIDAD_API}/contabilidad/resumen-caja/${periodo}`),
       ]);
       setObligaciones(obs.map(fromApi));
       setConsultas(regs);
@@ -489,6 +567,9 @@ export default function ContabilidadPage() {
       setResumen(res);
       setChecklist(chk);
       setAjuste(aj);
+      setCierre(cie);
+      setMovimientosCaja(movs);
+      setResumenCaja(caja);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "No se pudo conectar con contabilidad", false);
     } finally {
@@ -681,6 +762,59 @@ export default function ContabilidadPage() {
     fetchAll();
   };
 
+  const guardarMovimientoCaja = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const editing = editMovimiento;
+    const payload = {
+      ...movimientoForm,
+      monto: Number(movimientoForm.monto || 0),
+      medio: movimientoForm.medio || null,
+      referencia: movimientoForm.referencia || null,
+      notas: movimientoForm.notas || null,
+    };
+    try {
+      await apiJson<MovimientoCaja>(
+        editing ? `${CONTABILIDAD_API}/contabilidad/movimientos-caja/${editing.id}` : `${CONTABILIDAD_API}/contabilidad/movimientos-caja`,
+        { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) }
+      );
+      setEditMovimiento(null);
+      setMovimientoForm(emptyMovimientoCaja());
+      showToast(editing ? "Movimiento actualizado" : "Movimiento cargado");
+      fetchAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar el movimiento", false);
+    }
+  };
+
+  const eliminarMovimientoCaja = async (id: number) => {
+    if (!window.confirm("Eliminar movimiento de caja?")) return;
+    await fetch(`${CONTABILIDAD_API}/contabilidad/movimientos-caja/${id}`, { method: "DELETE", headers: authHeaders() });
+    fetchAll();
+  };
+
+  const guardarCierre = async (nuevo: CierreMensual) => {
+    try {
+      const saved = await apiJson<CierreMensual>(`${CONTABILIDAD_API}/contabilidad/cierres/${periodo}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          consultas_cargadas: nuevo.consultas_cargadas,
+          facturas_emitidas: nuevo.facturas_emitidas,
+          gastos_cargados: nuevo.gastos_cargados,
+          medicos_liquidados: nuevo.medicos_liquidados,
+          iva_revisado: nuevo.iva_revisado,
+          agip_revisado: nuevo.agip_revisado,
+          caja_conciliada: nuevo.caja_conciliada,
+          cerrado: nuevo.cerrado,
+          notas: nuevo.notas || null,
+        }),
+      });
+      setCierre(saved);
+      showToast("Cierre mensual guardado");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar el cierre", false);
+    }
+  };
+
   const guardarAjuste = async () => {
     try {
       await apiJson<AjusteIva>(`${CONTABILIDAD_API}/contabilidad/ajustes-iva/${periodo}`, {
@@ -753,6 +887,34 @@ export default function ContabilidadPage() {
       deducible_iva: g.deducible_iva,
       notas: g.notas ?? "",
     });
+  };
+
+  const startEditMovimiento = (m: MovimientoCaja) => {
+    setEditMovimiento(m);
+    setMovimientoForm({
+      fecha: m.fecha,
+      tipo: m.tipo,
+      categoria: m.categoria,
+      descripcion: m.descripcion,
+      monto: m.monto,
+      medio: m.medio ?? "",
+      referencia: m.referencia ?? "",
+      notas: m.notas ?? "",
+    });
+  };
+
+  const cargarComprobanteSugerido = (r: { medico: string; docya20: number }) => {
+    setEditComprobante(null);
+    setComprobanteForm({
+      ...emptyComprobante(),
+      fecha: range.hasta,
+      receptor_nombre: r.medico,
+      concepto: `Uso de plataforma DocYa - periodo ${periodo}`,
+      importe_neto: String(r.docya20.toFixed(2)),
+      notas: "Generado desde resumen mensual por medico. Completar CUIT, numero y CAE luego de emitir en ARCA.",
+    });
+    setTab("comprobantes");
+    showToast("Comprobante sugerido precargado");
   };
 
   return (
@@ -866,7 +1028,7 @@ export default function ContabilidadPage() {
               </form>
             </Card>
             <DataTable
-              headers={["Medico", "Consultas", "Total pacientes", "Facturar DocYa 20%", "Liquidar medico 80%", "MP absorbido", "Margen DocYa"]}
+              headers={["Medico", "Consultas", "Total pacientes", "Facturar DocYa 20%", "Liquidar medico 80%", "MP absorbido", "Margen DocYa", ""]}
               rows={resumenPorMedico.map((r) => [
                 r.medico,
                 r.cantidad,
@@ -875,6 +1037,7 @@ export default function ContabilidadPage() {
                 money(r.medico80),
                 money(r.mp6),
                 money(r.margenDocya),
+                <SmallButton key={r.medico} onClick={() => cargarComprobanteSugerido(r)} tone="primary"><FileText size={14} />Comprobante</SmallButton>,
               ])}
               empty="No hay consultas para agrupar por medico en este periodo."
             />
@@ -978,6 +1141,104 @@ export default function ContabilidadPage() {
               ])}
               empty="No hay gastos cargados en este periodo."
             />
+          </div>
+        )}
+
+        {tab === "caja" && (
+          <div className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-3">
+              <Metric icon={Banknote} label="Ingresos" value={money(resumenCaja?.ingresos)} helper="Entradas registradas en el mes" color="#4ade80" />
+              <Metric icon={WalletCards} label="Egresos" value={money(resumenCaja?.egresos)} helper="Pagos, impuestos, gastos y liquidaciones" color="#f87171" />
+              <Metric icon={Calculator} label="Saldo caja" value={money(resumenCaja?.saldo)} helper={`${resumenCaja?.movimientos_cantidad ?? 0} movimientos cargados`} color="var(--brand-primary-light)" />
+            </div>
+
+            <Card className="p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>{editMovimiento ? "Editar movimiento" : "Cargar movimiento de caja"}</h2>
+                {editMovimiento && <SmallButton onClick={() => { setEditMovimiento(null); setMovimientoForm(emptyMovimientoCaja()); }}><X size={14} />Cancelar</SmallButton>}
+              </div>
+              <form onSubmit={guardarMovimientoCaja} className="grid gap-3 md:grid-cols-4">
+                <Field label="Fecha"><TextInput type="date" value={movimientoForm.fecha} onChange={(e) => setMovimientoForm({ ...movimientoForm, fecha: e.target.value })} required /></Field>
+                <Field label="Tipo">
+                  <SelectInput value={movimientoForm.tipo} onChange={(e) => setMovimientoForm({ ...movimientoForm, tipo: e.target.value as MovimientoCaja["tipo"] })}>
+                    <option value="ingreso">Ingreso</option>
+                    <option value="egreso">Egreso</option>
+                  </SelectInput>
+                </Field>
+                <Field label="Categoria"><TextInput value={movimientoForm.categoria} onChange={(e) => setMovimientoForm({ ...movimientoForm, categoria: e.target.value })} required /></Field>
+                <Field label="Monto"><TextInput type="number" min={0} step="0.01" value={movimientoForm.monto} onChange={(e) => setMovimientoForm({ ...movimientoForm, monto: e.target.value })} required /></Field>
+                <Field label="Descripcion"><TextInput value={movimientoForm.descripcion} onChange={(e) => setMovimientoForm({ ...movimientoForm, descripcion: e.target.value })} required /></Field>
+                <Field label="Medio"><TextInput value={movimientoForm.medio ?? ""} onChange={(e) => setMovimientoForm({ ...movimientoForm, medio: e.target.value })} placeholder="Banco, MP, efectivo..." /></Field>
+                <Field label="Referencia"><TextInput value={movimientoForm.referencia ?? ""} onChange={(e) => setMovimientoForm({ ...movimientoForm, referencia: e.target.value })} /></Field>
+                <div className="flex items-end"><SmallButton type="submit" tone="primary"><Save size={15} />Guardar</SmallButton></div>
+              </form>
+            </Card>
+
+            <DataTable
+              headers={["Fecha", "Tipo", "Categoria", "Descripcion", "Monto", "Medio", ""]}
+              rows={movimientosCaja.map((m) => [
+                fmtFecha(m.fecha),
+                m.tipo,
+                m.categoria,
+                m.descripcion,
+                money(m.monto),
+                m.medio ?? "",
+                <div key={m.id} className="flex gap-2"><SmallButton onClick={() => startEditMovimiento(m)}><Pencil size={14} /></SmallButton><SmallButton onClick={() => eliminarMovimientoCaja(m.id)} tone="danger"><Trash2 size={14} /></SmallButton></div>,
+              ])}
+              empty="No hay movimientos de caja cargados en este periodo."
+            />
+          </div>
+        )}
+
+        {tab === "cierre" && (
+          <div className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-3">
+              <Metric icon={ClipboardCheck} label="Estado del mes" value={cierre.cerrado ? "Cerrado" : "Abierto"} helper={cierre.cerrado_en ? `Cerrado ${fmtFecha(cierre.cerrado_en.slice(0, 10))}` : "Checklist administrativo mensual"} color={cierre.cerrado ? "#4ade80" : "#fbbf24"} />
+              <Metric icon={ReceiptText} label="Facturacion DocYa" value={money(resumen?.comision_docya_neta)} helper="Total sugerido a facturar a medicos" />
+              <Metric icon={Banknote} label="Caja" value={money(resumenCaja?.saldo)} helper="Saldo manual conciliado del periodo" color="#60a5fa" />
+            </div>
+
+            <Card className="p-5">
+              <div className="mb-4 flex flex-col gap-1">
+                <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>Cierre mensual {periodo}</h2>
+                <p className="text-xs" style={{ color: "var(--text-muted)" }}>Marcá cada paso cuando lo hayas revisado. Esto es tu control administrativo de la SAS.</p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {[
+                  ["consultas_cargadas", "Consultas cargadas"],
+                  ["facturas_emitidas", "Facturas a medicos emitidas"],
+                  ["gastos_cargados", "Gastos y MP cargados"],
+                  ["medicos_liquidados", "Medicos liquidados"],
+                  ["iva_revisado", "IVA ARCA revisado"],
+                  ["agip_revisado", "AGIP revisado"],
+                  ["caja_conciliada", "Caja conciliada"],
+                ].map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm" style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-primary)", border: "1px solid var(--border-subtle)" }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(cierre[key as keyof CierreMensual])}
+                      onChange={(e) => {
+                        const next = { ...cierre, [key]: e.target.checked };
+                        setCierre(next);
+                        guardarCierre(next);
+                      }}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              <div className="mt-4">
+                <Field label="Notas del cierre">
+                  <TextArea rows={3} value={cierre.notas ?? ""} onChange={(e) => setCierre({ ...cierre, notas: e.target.value })} placeholder="Observaciones, pagos pendientes, diferencias de caja..." />
+                </Field>
+              </div>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <SmallButton onClick={() => guardarCierre(cierre)} tone="success"><Save size={15} />Guardar notas</SmallButton>
+                <SmallButton onClick={() => guardarCierre({ ...cierre, cerrado: !cierre.cerrado })} tone={cierre.cerrado ? "muted" : "primary"}>
+                  <CheckCircle2 size={15} />{cierre.cerrado ? "Reabrir mes" : "Cerrar mes"}
+                </SmallButton>
+              </div>
+            </Card>
           </div>
         )}
 
