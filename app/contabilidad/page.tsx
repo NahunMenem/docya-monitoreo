@@ -61,6 +61,13 @@ type RegistroConsulta = {
   comision_docya_pct: string;
   comision_mp_pct: string;
   iva_pct: string;
+  comision_docya_importe: string;
+  comision_mp_importe: string;
+  neto_medico_importe: string;
+  base_despues_mp: string;
+  margen_docya_post_mp: string;
+  iva_debito_docya: string;
+  iva_credito_mp: string;
 };
 
 type Comprobante = {
@@ -110,7 +117,9 @@ type ResumenIva = {
   comprobantes_cantidad: number;
   gastos_cantidad: number;
   total_consultas_paciente: string;
+  neto_medicos_total: string;
   comision_docya_neta: string;
+  margen_docya_post_mp: string;
   iva_debito_consultas: string;
   iva_debito_comprobantes: string;
   iva_debito_total: string;
@@ -176,10 +185,6 @@ function periodoRange(periodo: string) {
 function money(value: string | number | null | undefined) {
   const n = Number(value ?? 0);
   return n.toLocaleString("es-AR", { style: "currency", currency: "ARS" });
-}
-
-function pct(value: string | number) {
-  return `${Number(value).toLocaleString("es-AR", { maximumFractionDigits: 2 })}%`;
 }
 
 function authHeaders() {
@@ -762,8 +767,8 @@ export default function ContabilidadPage() {
           <div className="space-y-5">
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <Metric icon={ReceiptText} label="IVA debito" value={money(resumen?.iva_debito_total)} helper="Consultas manuales + comprobantes emitidos" />
-              <Metric icon={WalletCards} label="IVA credito" value={money(resumen?.iva_credito_total)} helper="MP + gastos + percepciones + ajustes" color="#60a5fa" />
-              <Metric icon={Calculator} label="A pagar estimado" value={money(resumen?.iva_a_pagar_estimado)} helper="Saldo tecnico positivo del periodo" color="#fbbf24" />
+              <Metric icon={WalletCards} label="MP absorbido" value={money(resumen?.comision_mp_neta)} helper="Costo DocYa por Mercado Pago 6%" color="#60a5fa" />
+              <Metric icon={Calculator} label="Margen DocYa" value={money(resumen?.margen_docya_post_mp)} helper="Comision DocYa menos MP absorbido" color="#fbbf24" />
               <Metric icon={CheckCircle2} label="Saldo a favor" value={money(resumen?.saldo_a_favor_estimado)} helper="Saldo tecnico negativo del periodo" color="#4ade80" />
             </div>
 
@@ -781,6 +786,9 @@ export default function ContabilidadPage() {
               </div>
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                 <Metric icon={ReceiptText} label="Consultas cargadas" value={resumen?.consultas_cantidad ?? 0} helper={`Total pacientes ${money(resumen?.total_consultas_paciente)}`} />
+                <Metric icon={CheckCircle2} label="Medicos 80%" value={money(resumen?.neto_medicos_total)} helper="Importe que corresponde liquidar a profesionales" color="#4ade80" />
+                <Metric icon={Calculator} label="DocYa 20%" value={money(resumen?.comision_docya_neta)} helper="Base que DocYa factura por uso de plataforma" color="var(--brand-primary-light)" />
+                <Metric icon={WalletCards} label="Mercado Pago 6%" value={money(resumen?.comision_mp_neta)} helper={`IVA credito MP ${money(resumen?.iva_credito_mp)}`} color="#60a5fa" />
                 <Metric icon={FileText} label="Comprobantes" value={resumen?.comprobantes_cantidad ?? 0} helper={`Debito extra ${money(resumen?.iva_debito_comprobantes)}`} />
                 <Metric icon={WalletCards} label="Gastos" value={resumen?.gastos_cantidad ?? 0} helper={`Credito gastos ${money(resumen?.iva_credito_gastos)}`} />
               </div>
@@ -822,14 +830,15 @@ export default function ContabilidadPage() {
               </form>
             </Card>
             <DataTable
-              headers={["Fecha", "Medico", "Tipo", "Precio", "Comision DocYa", "IVA", ""]}
+              headers={["Fecha", "Medico", "Precio", "Medico 80%", "DocYa 20%", "MP 6%", "Margen DocYa", ""]}
               rows={consultas.map((r) => [
                 fmtFecha(r.fecha),
                 r.medico,
-                r.tipo,
                 money(r.precio),
-                pct(r.comision_docya_pct),
-                pct(r.iva_pct),
+                money(r.neto_medico_importe),
+                money(r.comision_docya_importe),
+                money(r.comision_mp_importe),
+                money(r.margen_docya_post_mp),
                 <SmallButton key={r.id} onClick={() => eliminarConsulta(r.id)} tone="danger" title="Eliminar"><Trash2 size={14} /></SmallButton>,
               ])}
               empty="No hay consultas cargadas en este periodo."
