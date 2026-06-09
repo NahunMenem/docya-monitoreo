@@ -517,6 +517,38 @@ export default function ContabilidadPage() {
   const vencidos = filasVencimientos.filter((f) => f.dias < 0).length;
   const urgentes = filasVencimientos.filter((f) => f.dias >= 0 && f.dias <= 3).length;
 
+  const resumenPorMedico = useMemo(() => {
+    const map = new Map<string, {
+      medico: string;
+      cantidad: number;
+      totalPaciente: number;
+      medico80: number;
+      docya20: number;
+      mp6: number;
+      margenDocya: number;
+    }>();
+    for (const consulta of consultas) {
+      const key = consulta.medico.trim() || "Sin medico";
+      const current = map.get(key) ?? {
+        medico: key,
+        cantidad: 0,
+        totalPaciente: 0,
+        medico80: 0,
+        docya20: 0,
+        mp6: 0,
+        margenDocya: 0,
+      };
+      current.cantidad += 1;
+      current.totalPaciente += Number(consulta.precio ?? 0);
+      current.medico80 += Number(consulta.neto_medico_importe ?? 0);
+      current.docya20 += Number(consulta.comision_docya_importe ?? 0);
+      current.mp6 += Number(consulta.comision_mp_importe ?? 0);
+      current.margenDocya += Number(consulta.margen_docya_post_mp ?? 0);
+      map.set(key, current);
+    }
+    return Array.from(map.values()).sort((a, b) => b.docya20 - a.docya20);
+  }, [consultas]);
+
   const guardarObligacion = async (e: React.FormEvent) => {
     e.preventDefault();
     const editing = editObligacion;
@@ -833,6 +865,19 @@ export default function ContabilidadPage() {
                 <div className="flex items-end"><SmallButton type="submit" tone="primary"><Plus size={15} />Agregar</SmallButton></div>
               </form>
             </Card>
+            <DataTable
+              headers={["Medico", "Consultas", "Total pacientes", "Facturar DocYa 20%", "Liquidar medico 80%", "MP absorbido", "Margen DocYa"]}
+              rows={resumenPorMedico.map((r) => [
+                r.medico,
+                r.cantidad,
+                money(r.totalPaciente),
+                money(r.docya20),
+                money(r.medico80),
+                money(r.mp6),
+                money(r.margenDocya),
+              ])}
+              empty="No hay consultas para agrupar por medico en este periodo."
+            />
             <DataTable
               headers={["Fecha", "Medico", "Precio", "Medico 80%", "DocYa 20%", "MP 6%", "Margen DocYa", ""]}
               rows={consultas.map((r) => [
