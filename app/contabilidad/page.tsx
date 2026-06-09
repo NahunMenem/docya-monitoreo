@@ -3,25 +3,29 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ElementType } from "react";
 import Sidebar from "@/components/sidebar";
-import LibroConsultas from "./LibroConsultas";
 import {
   AlertTriangle,
   Bell,
-  BookOpen,
   Calculator,
   CalendarClock,
-  Check,
   CheckCircle2,
+  Download,
+  FileText,
+  Landmark,
   Pencil,
   Plus,
+  ReceiptText,
   RefreshCw,
+  Save,
   Trash2,
+  WalletCards,
   X,
 } from "lucide-react";
 
 const CONTABILIDAD_API = process.env.NEXT_PUBLIC_CONTABILIDAD_API_BASE!;
 
 type Periodicidad = "mensual" | "anual";
+type Tab = "arca" | "consultas" | "comprobantes" | "gastos" | "vencimientos";
 type Tono = "red" | "yellow" | "teal" | "green";
 
 type Obligacion = {
@@ -29,15 +33,13 @@ type Obligacion = {
   nombre: string;
   organismo: string;
   periodicidad: Periodicidad;
-  diaVencimiento: number; // 1-28 (mensual) o 1-31 (anual)
-  mesVencimiento?: number; // 1-12, solo para periodicidad "anual"
+  diaVencimiento: number;
+  mesVencimiento?: number;
   notas?: string;
   activa: boolean;
-  ultimoPeriodoCumplido?: string; // "YYYY-MM" (mensual) o "YYYY" (anual)
+  ultimoPeriodoCumplido?: string;
 };
 
-// Forma en la que viaja la obligacion desde/hacia la API de contabilidad
-// (en snake_case, como el resto del backend de DocYa).
 type ApiObligacion = {
   id: number;
   nombre: string;
@@ -49,6 +51,144 @@ type ApiObligacion = {
   activa: boolean;
   ultimo_periodo_cumplido: string | null;
 };
+
+type RegistroConsulta = {
+  id: number;
+  fecha: string;
+  medico: string;
+  tipo: string;
+  precio: string;
+  comision_docya_pct: string;
+  comision_mp_pct: string;
+  iva_pct: string;
+};
+
+type Comprobante = {
+  id: number;
+  fecha: string;
+  tipo_comprobante: string;
+  letra: string;
+  punto_venta: number;
+  numero: number;
+  receptor_nombre: string;
+  receptor_documento: string | null;
+  condicion_iva_receptor: string | null;
+  concepto: string;
+  importe_neto: string;
+  iva_pct: string;
+  iva_debito: string;
+  importe_total: string;
+  cae: string | null;
+  cae_vencimiento: string | null;
+  estado: "borrador" | "emitido" | "anulado";
+  notas: string | null;
+};
+
+type Gasto = {
+  id: number;
+  fecha: string;
+  proveedor_nombre: string;
+  proveedor_cuit: string | null;
+  tipo_comprobante: string;
+  letra: string | null;
+  punto_venta: number | null;
+  numero: number | null;
+  concepto: string;
+  categoria: string | null;
+  importe_neto: string;
+  iva_pct: string;
+  iva_credito: string;
+  percepciones: string;
+  importe_total: string;
+  deducible_iva: boolean;
+  notas: string | null;
+};
+
+type ResumenIva = {
+  periodo: string;
+  consultas_cantidad: number;
+  comprobantes_cantidad: number;
+  gastos_cantidad: number;
+  total_consultas_paciente: string;
+  comision_docya_neta: string;
+  iva_debito_consultas: string;
+  iva_debito_comprobantes: string;
+  iva_debito_total: string;
+  comision_mp_neta: string;
+  iva_credito_mp: string;
+  iva_credito_gastos: string;
+  otros_creditos: string;
+  percepciones: string;
+  iva_credito_total: string;
+  iva_saldo_tecnico: string;
+  iva_a_pagar_estimado: string;
+  saldo_a_favor_estimado: string;
+  notas_ajuste: string | null;
+};
+
+type ChecklistArca = {
+  periodo: string;
+  listo_para_revisar: boolean;
+  pendientes: string[];
+  fuentes: string[];
+};
+
+type AjusteIva = {
+  periodo: string;
+  otros_creditos: string;
+  notas: string | null;
+};
+
+type ObligacionForm = Omit<Obligacion, "id">;
+type ConsultaForm = { fecha: string; medico: string; tipo: string; precio: string };
+type ComprobanteForm = Omit<Comprobante, "id" | "iva_debito" | "importe_total">;
+type GastoForm = Omit<Gasto, "id" | "iva_credito" | "importe_total">;
+
+const MESES = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
+
+const tabs: { id: Tab; label: string; icon: ElementType }[] = [
+  { id: "arca", label: "Resumen ARCA", icon: Landmark },
+  { id: "consultas", label: "Consultas", icon: ReceiptText },
+  { id: "comprobantes", label: "Comprobantes", icon: FileText },
+  { id: "gastos", label: "Gastos", icon: WalletCards },
+  { id: "vencimientos", label: "Vencimientos", icon: CalendarClock },
+];
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function currentPeriodo() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function periodoRange(periodo: string) {
+  const [year, month] = periodo.split("-").map(Number);
+  const desde = `${periodo}-01`;
+  const hastaDate = new Date(year, month, 0);
+  return { desde, hasta: hastaDate.toISOString().slice(0, 10) };
+}
+
+function money(value: string | number | null | undefined) {
+  const n = Number(value ?? 0);
+  return n.toLocaleString("es-AR", { style: "currency", currency: "ARS" });
+}
+
+function pct(value: string | number) {
+  return `${Number(value).toLocaleString("es-AR", { maximumFractionDigits: 2 })}%`;
+}
+
+function authHeaders() {
+  const token = typeof window !== "undefined" ? localStorage.getItem("docya_token") : null;
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
 
 function fromApi(o: ApiObligacion): Obligacion {
   return {
@@ -64,7 +204,7 @@ function fromApi(o: ApiObligacion): Obligacion {
   };
 }
 
-function toApiPayload(data: Omit<Obligacion, "id">) {
+function toApiPayload(data: ObligacionForm) {
   return {
     nombre: data.nombre,
     organismo: data.organismo,
@@ -75,20 +215,6 @@ function toApiPayload(data: Omit<Obligacion, "id">) {
     activa: data.activa,
   };
 }
-
-function authHeaders() {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("docya_token") : null;
-  return {
-    "Content-Type": "application/json",
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
-
-const MESES = [
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-];
 
 function startOfDay(d: Date) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -112,9 +238,7 @@ function nextVencimiento(ob: Obligacion, today: Date): { fecha: Date; periodo: s
       : new Date(probe.getFullYear(), probe.getMonth(), ob.diaVencimiento);
     const periodo = periodKey(fecha, ob.periodicidad);
     const yaCumplido = !!ob.ultimoPeriodoCumplido && periodo <= ob.ultimoPeriodoCumplido;
-    if (!yaCumplido && fecha >= hoy) {
-      return { fecha, periodo };
-    }
+    if (!yaCumplido && fecha >= hoy) return { fecha, periodo };
     probe = ob.periodicidad === "anual"
       ? new Date(probe.getFullYear() + 1, 0, 1)
       : new Date(probe.getFullYear(), probe.getMonth() + 1, 1);
@@ -139,7 +263,8 @@ function toneClass(tone: Tono) {
   return tone === "red" ? "badge-red" : tone === "yellow" ? "badge-yellow" : tone === "teal" ? "badge-teal" : "badge-green";
 }
 
-function fmtFecha(d: Date) {
+function fmtFecha(value: string | Date) {
+  const d = typeof value === "string" ? new Date(`${value}T00:00:00`) : value;
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "2-digit", year: "numeric" });
 }
 
@@ -150,7 +275,7 @@ function periodoLabel(periodo: string, periodicidad: Periodicidad) {
   return `${MESES[idx] ?? mes} ${anio}`;
 }
 
-function emptyForm(): Omit<Obligacion, "id"> {
+function emptyObligacion(): ObligacionForm {
   return {
     nombre: "",
     organismo: "ARCA (ex-AFIP)",
@@ -162,214 +287,213 @@ function emptyForm(): Omit<Obligacion, "id"> {
   };
 }
 
-function SummaryCard({
-  icon: Icon, label, value, color, helper,
-}: {
+function emptyConsulta(): ConsultaForm {
+  return { fecha: todayIso(), medico: "", tipo: "Teleconsulta", precio: "" };
+}
+
+function emptyComprobante(): ComprobanteForm {
+  return {
+    fecha: todayIso(),
+    tipo_comprobante: "Factura",
+    letra: "B",
+    punto_venta: 1,
+    numero: 1,
+    receptor_nombre: "",
+    receptor_documento: "",
+    condicion_iva_receptor: "Consumidor final",
+    concepto: "Servicios DocYa",
+    importe_neto: "",
+    iva_pct: "21",
+    cae: "",
+    cae_vencimiento: null,
+    estado: "emitido",
+    notas: "",
+  };
+}
+
+function emptyGasto(): GastoForm {
+  return {
+    fecha: todayIso(),
+    proveedor_nombre: "",
+    proveedor_cuit: "",
+    tipo_comprobante: "Factura",
+    letra: "B",
+    punto_venta: null,
+    numero: null,
+    concepto: "",
+    categoria: "Operativo",
+    importe_neto: "",
+    iva_pct: "21",
+    percepciones: "0",
+    deducible_iva: true,
+    notas: "",
+  };
+}
+
+async function apiJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, { ...init, headers: { ...authHeaders(), ...(init?.headers ?? {}) } });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail ?? "No se pudo completar la operacion");
+  }
+  return res.json() as Promise<T>;
+}
+
+function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <section className={`rounded-2xl ${className}`} style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
+      {children}
+    </section>
+  );
+}
+
+function Metric({ icon: Icon, label, value, helper, color = "var(--brand-primary-light)" }: {
   icon: ElementType;
   label: string;
   value: string | number;
-  color: string;
   helper: string;
+  color?: string;
 }) {
   return (
-    <div className="rounded-2xl p-5" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
-      <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl" style={{ background: "rgba(20,184,166,0.1)" }}>
-        <Icon size={20} style={{ color }} />
+    <Card className="p-5">
+      <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: "rgba(20,184,166,0.1)" }}>
+        <Icon size={19} style={{ color }} />
       </div>
-      <p className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--text-muted)" }}>{label}</p>
+      <p className="text-xs font-bold uppercase" style={{ color: "var(--text-muted)" }}>{label}</p>
       <p className="mt-1 text-2xl font-black" style={{ color: "var(--text-primary)" }}>{value}</p>
       <p className="mt-2 text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>{helper}</p>
-    </div>
+    </Card>
   );
 }
 
-function ObligacionModal({
-  initial,
-  onClose,
-  onSave,
-}: {
-  initial: Obligacion | null;
-  onClose: () => void;
-  onSave: (data: Omit<Obligacion, "id">) => void;
-}) {
-  const [form, setForm] = useState<Omit<Obligacion, "id">>(initial ?? emptyForm());
-  const isEdit = !!initial;
-
+function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="w-full max-w-lg rounded-xl p-6 space-y-4" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold text-lg" style={{ color: "var(--text-primary)" }}>
-            {isEdit ? "Editar obligacion" : "Nueva obligacion"}
-          </h2>
-          <button onClick={onClose} className="p-1 rounded-md hover:bg-white/5 transition-colors" style={{ color: "var(--text-muted)" }}>
-            <X size={18} />
-          </button>
-        </div>
-
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Nombre</label>
-            <input
-              value={form.nombre}
-              onChange={(e) => setForm({ ...form, nombre: e.target.value })}
-              placeholder="Ej: IVA - Posicion mensual (F. 2002)"
-              className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-              style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Organismo</label>
-              <input
-                value={form.organismo}
-                onChange={(e) => setForm({ ...form, organismo: e.target.value })}
-                placeholder="ARCA, AGIP, Contador..."
-                className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-              />
-            </div>
-            <div>
-              <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Periodicidad</label>
-              <select
-                value={form.periodicidad}
-                onChange={(e) => {
-                  const periodicidad = e.target.value as Periodicidad;
-                  const diaVencimiento = periodicidad === "mensual" ? Math.min(28, form.diaVencimiento) : form.diaVencimiento;
-                  setForm({ ...form, periodicidad, diaVencimiento });
-                }}
-                className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-              >
-                <option value="mensual">Mensual</option>
-                <option value="anual">Anual</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Dia del vencimiento</label>
-              <input
-                type="number"
-                min={1}
-                max={form.periodicidad === "anual" ? 31 : 28}
-                value={form.diaVencimiento}
-                onChange={(e) => {
-                  const tope = form.periodicidad === "anual" ? 31 : 28;
-                  setForm({ ...form, diaVencimiento: Math.min(tope, Math.max(1, Number(e.target.value) || 1)) });
-                }}
-                className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-                style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-              />
-              {form.periodicidad === "mensual" && (
-                <p className="mt-1 text-[11px]" style={{ color: "var(--text-muted)" }}>Maximo 28 para que aplique a todos los meses (incluido febrero).</p>
-              )}
-            </div>
-            {form.periodicidad === "anual" && (
-              <div>
-                <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Mes del vencimiento</label>
-                <select
-                  value={form.mesVencimiento ?? 1}
-                  onChange={(e) => setForm({ ...form, mesVencimiento: Number(e.target.value) })}
-                  className="w-full rounded-lg px-3 py-2 text-sm outline-none"
-                  style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-                >
-                  {MESES.map((m, i) => (
-                    <option key={m} value={i + 1}>{m}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-xs mb-1" style={{ color: "var(--text-muted)" }}>Notas</label>
-            <textarea
-              value={form.notas ?? ""}
-              onChange={(e) => setForm({ ...form, notas: e.target.value })}
-              rows={2}
-              placeholder="Aclaraciones, links al cronograma oficial, etc."
-              className="w-full rounded-lg px-3 py-2 text-sm outline-none resize-none"
-              style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)" }}
-            />
-          </div>
-
-          <label className="flex items-center gap-2 text-sm" style={{ color: "var(--text-primary)" }}>
-            <input
-              type="checkbox"
-              checked={form.activa}
-              onChange={(e) => setForm({ ...form, activa: e.target.checked })}
-            />
-            Obligacion activa (mostrar en el calendario y avisar)
-          </label>
-        </div>
-
-        <div className="flex justify-end gap-2 pt-2">
-          <button
-            onClick={onClose}
-            className="rounded-xl px-4 py-2 text-sm font-bold transition hover:opacity-80"
-            style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
-          >
-            Cancelar
-          </button>
-          <button
-            onClick={() => form.nombre.trim() && onSave(form)}
-            disabled={!form.nombre.trim()}
-            className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition hover:opacity-90 disabled:opacity-50"
-            style={{ background: "var(--brand-primary)", color: "#fff" }}
-          >
-            <Check size={16} />
-            Guardar
-          </button>
-        </div>
-      </div>
-    </div>
+    <input
+      {...props}
+      className={`w-full rounded-lg px-3 py-2 text-sm outline-none ${props.className ?? ""}`}
+      style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)", ...(props.style ?? {}) }}
+    />
   );
 }
 
-type Tab = "vencimientos" | "libro";
+function SelectInput(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      {...props}
+      className={`w-full rounded-lg px-3 py-2 text-sm outline-none ${props.className ?? ""}`}
+      style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)", ...(props.style ?? {}) }}
+    />
+  );
+}
+
+function TextArea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return (
+    <textarea
+      {...props}
+      className={`w-full resize-none rounded-lg px-3 py-2 text-sm outline-none ${props.className ?? ""}`}
+      style={{ background: "var(--input-bg)", border: "1px solid var(--border-subtle)", color: "var(--text-primary)", ...(props.style ?? {}) }}
+    />
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-xs" style={{ color: "var(--text-muted)" }}>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function SmallButton({ children, onClick, tone = "muted", disabled = false, type = "button", title }: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  tone?: "primary" | "danger" | "success" | "muted";
+  disabled?: boolean;
+  type?: "button" | "submit";
+  title?: string;
+}) {
+  const styles = {
+    primary: { background: "var(--brand-primary)", color: "#fff", border: "1px solid var(--brand-primary)" },
+    danger: { background: "rgba(239,68,68,0.1)", color: "#f87171", border: "1px solid rgba(239,68,68,0.25)" },
+    success: { background: "rgba(34,197,94,0.12)", color: "#4ade80", border: "1px solid rgba(34,197,94,0.25)" },
+    muted: { background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" },
+  }[tone];
+  return (
+    <button
+      type={type}
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className="inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-bold transition hover:opacity-85 disabled:opacity-45"
+      style={styles}
+    >
+      {children}
+    </button>
+  );
+}
 
 export default function ContabilidadPage() {
-  const [tab, setTab] = useState<Tab>("vencimientos");
-  const [obligaciones, setObligaciones] = useState<Obligacion[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [modal, setModal] = useState<{ obligacion: Obligacion | null } | null>(null);
+  const [tab, setTab] = useState<Tab>("arca");
+  const [periodo, setPeriodo] = useState(currentPeriodo());
+  const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<Obligacion | null>(null);
+
+  const [obligaciones, setObligaciones] = useState<Obligacion[]>([]);
+  const [consultas, setConsultas] = useState<RegistroConsulta[]>([]);
+  const [comprobantes, setComprobantes] = useState<Comprobante[]>([]);
+  const [gastos, setGastos] = useState<Gasto[]>([]);
+  const [resumen, setResumen] = useState<ResumenIva | null>(null);
+  const [checklist, setChecklist] = useState<ChecklistArca | null>(null);
+  const [ajuste, setAjuste] = useState<AjusteIva>({ periodo, otros_creditos: "0", notas: "" });
+
+  const [obligacionForm, setObligacionForm] = useState<ObligacionForm>(emptyObligacion());
+  const [editObligacion, setEditObligacion] = useState<Obligacion | null>(null);
+  const [consultaForm, setConsultaForm] = useState<ConsultaForm>(emptyConsulta());
+  const [comprobanteForm, setComprobanteForm] = useState<ComprobanteForm>(emptyComprobante());
+  const [editComprobante, setEditComprobante] = useState<Comprobante | null>(null);
+  const [gastoForm, setGastoForm] = useState<GastoForm>(emptyGasto());
+  const [editGasto, setEditGasto] = useState<Gasto | null>(null);
 
   const showToast = useCallback((msg: string, ok = true) => {
     setToast({ msg, ok });
-    setTimeout(() => setToast(null), 3000);
+    window.setTimeout(() => setToast(null), 3000);
   }, []);
 
-  const fetchObligaciones = useCallback(async () => {
+  const range = useMemo(() => periodoRange(periodo), [periodo]);
+
+  const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${CONTABILIDAD_API}/contabilidad/obligaciones`, {
-        headers: authHeaders(),
-      });
-      if (!res.ok) {
-        showToast("No se pudieron cargar las obligaciones", false);
-        return;
-      }
-      const data: ApiObligacion[] = await res.json();
-      setObligaciones(data.map(fromApi));
-    } catch {
-      showToast("No se pudo conectar con el servicio de contabilidad", false);
+      const [obs, regs, comps, gs, res, chk, aj] = await Promise.all([
+        apiJson<ApiObligacion[]>(`${CONTABILIDAD_API}/contabilidad/obligaciones`),
+        apiJson<RegistroConsulta[]>(`${CONTABILIDAD_API}/contabilidad/registros-consultas?desde=${range.desde}&hasta=${range.hasta}`),
+        apiJson<Comprobante[]>(`${CONTABILIDAD_API}/contabilidad/comprobantes-emitidos?desde=${range.desde}&hasta=${range.hasta}`),
+        apiJson<Gasto[]>(`${CONTABILIDAD_API}/contabilidad/gastos-compras?desde=${range.desde}&hasta=${range.hasta}`),
+        apiJson<ResumenIva>(`${CONTABILIDAD_API}/contabilidad/resumen-iva/${periodo}`),
+        apiJson<ChecklistArca>(`${CONTABILIDAD_API}/contabilidad/arca/checklist/${periodo}`),
+        apiJson<AjusteIva>(`${CONTABILIDAD_API}/contabilidad/ajustes-iva/${periodo}`),
+      ]);
+      setObligaciones(obs.map(fromApi));
+      setConsultas(regs);
+      setComprobantes(comps);
+      setGastos(gs);
+      setResumen(res);
+      setChecklist(chk);
+      setAjuste(aj);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo conectar con contabilidad", false);
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [periodo, range.desde, range.hasta, showToast]);
 
   useEffect(() => {
-    fetchObligaciones();
-  }, [fetchObligaciones]);
+    fetchAll();
+  }, [fetchAll]);
 
   const today = useMemo(() => new Date(), []);
-
-  const filas = useMemo(() => {
+  const filasVencimientos = useMemo(() => {
     return obligaciones
       .filter((o) => o.activa)
       .map((o) => {
@@ -382,344 +506,468 @@ export default function ContabilidadPage() {
       .sort((a, b) => a.fecha.getTime() - b.fecha.getTime());
   }, [obligaciones, today]);
 
-  const inactivas = useMemo(() => obligaciones.filter((o) => !o.activa), [obligaciones]);
+  const vencidos = filasVencimientos.filter((f) => f.dias < 0).length;
+  const urgentes = filasVencimientos.filter((f) => f.dias >= 0 && f.dias <= 3).length;
 
-  const vencidos = filas.filter((f) => f.dias < 0).length;
-  const urgentes = filas.filter((f) => f.dias >= 0 && f.dias <= 3).length;
-  const proximos = filas.filter((f) => f.dias > 3 && f.dias <= 10).length;
-  const activas = filas.length;
-
-  const marcarCumplido = async (ob: Obligacion, periodo: string) => {
+  const guardarObligacion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const editing = editObligacion;
     try {
-      const res = await fetch(`${CONTABILIDAD_API}/contabilidad/obligaciones/${ob.id}/marcar-presentada`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ periodo }),
-      });
-      if (!res.ok) {
-        showToast("No se pudo marcar la obligacion como presentada", false);
-        return;
-      }
-      const data: ApiObligacion = await res.json();
-      setObligaciones((prev) => prev.map((o) => (o.id === ob.id ? fromApi(data) : o)));
-      showToast("Obligacion marcada como presentada para ese periodo");
-    } catch {
-      showToast("No se pudo conectar con el servicio de contabilidad", false);
+      const saved = await apiJson<ApiObligacion>(
+        editing ? `${CONTABILIDAD_API}/contabilidad/obligaciones/${editing.id}` : `${CONTABILIDAD_API}/contabilidad/obligaciones`,
+        { method: editing ? "PUT" : "POST", body: JSON.stringify(toApiPayload(obligacionForm)) }
+      );
+      setObligaciones((prev) => editing ? prev.map((o) => (o.id === saved.id ? fromApi(saved) : o)) : [...prev, fromApi(saved)]);
+      setEditObligacion(null);
+      setObligacionForm(emptyObligacion());
+      showToast(editing ? "Obligacion actualizada" : "Obligacion agregada");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar", false);
     }
   };
 
-  const guardarObligacion = async (data: Omit<Obligacion, "id">) => {
-    const editando = modal?.obligacion ?? null;
+  const marcarCumplido = async (ob: Obligacion, per: string) => {
     try {
-      const res = await fetch(
-        editando
-          ? `${CONTABILIDAD_API}/contabilidad/obligaciones/${editando.id}`
-          : `${CONTABILIDAD_API}/contabilidad/obligaciones`,
-        {
-          method: editando ? "PUT" : "POST",
-          headers: authHeaders(),
-          body: JSON.stringify(toApiPayload(data)),
-        }
-      );
-      if (!res.ok) {
-        const detalle = await res.json().catch(() => null);
-        showToast(detalle?.detail ?? "No se pudo guardar la obligacion", false);
-        return;
-      }
-      const saved: ApiObligacion = await res.json();
-      setObligaciones((prev) =>
-        editando ? prev.map((o) => (o.id === saved.id ? fromApi(saved) : o)) : [...prev, fromApi(saved)]
-      );
-      showToast(editando ? "Obligacion actualizada" : "Obligacion agregada");
-      setModal(null);
-    } catch {
-      showToast("No se pudo conectar con el servicio de contabilidad", false);
+      const saved = await apiJson<ApiObligacion>(`${CONTABILIDAD_API}/contabilidad/obligaciones/${ob.id}/marcar-presentada`, {
+        method: "POST",
+        body: JSON.stringify({ periodo: per }),
+      });
+      setObligaciones((prev) => prev.map((o) => (o.id === ob.id ? fromApi(saved) : o)));
+      showToast("Obligacion marcada como presentada");
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo marcar", false);
     }
   };
 
   const eliminarObligacion = async (ob: Obligacion) => {
+    if (!window.confirm(`Eliminar ${ob.nombre}?`)) return;
     try {
-      const res = await fetch(`${CONTABILIDAD_API}/contabilidad/obligaciones/${ob.id}`, {
-        method: "DELETE",
-        headers: authHeaders(),
-      });
-      if (!res.ok && res.status !== 204) {
-        showToast("No se pudo eliminar la obligacion", false);
-        return;
-      }
+      await fetch(`${CONTABILIDAD_API}/contabilidad/obligaciones/${ob.id}`, { method: "DELETE", headers: authHeaders() });
       setObligaciones((prev) => prev.filter((o) => o.id !== ob.id));
       showToast("Obligacion eliminada");
     } catch {
-      showToast("No se pudo conectar con el servicio de contabilidad", false);
-    } finally {
-      setConfirmDelete(null);
+      showToast("No se pudo eliminar", false);
     }
   };
 
-  const toggleActiva = async (ob: Obligacion) => {
+  const guardarConsulta = async (e: React.FormEvent) => {
+    e.preventDefault();
     try {
-      const res = await fetch(`${CONTABILIDAD_API}/contabilidad/obligaciones/${ob.id}`, {
-        method: "PUT",
-        headers: authHeaders(),
-        body: JSON.stringify(toApiPayload({ ...ob, activa: !ob.activa })),
+      const saved = await apiJson<RegistroConsulta>(`${CONTABILIDAD_API}/contabilidad/registros-consultas`, {
+        method: "POST",
+        body: JSON.stringify({ ...consultaForm, precio: Number(consultaForm.precio || 0) }),
       });
-      if (!res.ok) {
-        showToast("No se pudo actualizar la obligacion", false);
-        return;
-      }
-      const saved: ApiObligacion = await res.json();
-      setObligaciones((prev) => prev.map((o) => (o.id === saved.id ? fromApi(saved) : o)));
-    } catch {
-      showToast("No se pudo conectar con el servicio de contabilidad", false);
+      setConsultas((prev) => [saved, ...prev]);
+      setConsultaForm(emptyConsulta());
+      showToast("Consulta cargada");
+      fetchAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo cargar la consulta", false);
     }
+  };
+
+  const eliminarConsulta = async (id: number) => {
+    if (!window.confirm("Eliminar esta consulta del libro?")) return;
+    await fetch(`${CONTABILIDAD_API}/contabilidad/registros-consultas/${id}`, { method: "DELETE", headers: authHeaders() });
+    setConsultas((prev) => prev.filter((r) => r.id !== id));
+    fetchAll();
+  };
+
+  const guardarComprobante = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const editing = editComprobante;
+    const payload = {
+      ...comprobanteForm,
+      receptor_documento: comprobanteForm.receptor_documento || null,
+      condicion_iva_receptor: comprobanteForm.condicion_iva_receptor || null,
+      importe_neto: Number(comprobanteForm.importe_neto || 0),
+      iva_pct: Number(comprobanteForm.iva_pct || 0),
+      cae: comprobanteForm.cae || null,
+      cae_vencimiento: comprobanteForm.cae_vencimiento || null,
+      notas: comprobanteForm.notas || null,
+    };
+    try {
+      await apiJson<Comprobante>(
+        editing ? `${CONTABILIDAD_API}/contabilidad/comprobantes-emitidos/${editing.id}` : `${CONTABILIDAD_API}/contabilidad/comprobantes-emitidos`,
+        { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) }
+      );
+      setEditComprobante(null);
+      setComprobanteForm(emptyComprobante());
+      showToast(editing ? "Comprobante actualizado" : "Comprobante cargado");
+      fetchAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar el comprobante", false);
+    }
+  };
+
+  const eliminarComprobante = async (id: number) => {
+    if (!window.confirm("Eliminar comprobante?")) return;
+    await fetch(`${CONTABILIDAD_API}/contabilidad/comprobantes-emitidos/${id}`, { method: "DELETE", headers: authHeaders() });
+    fetchAll();
+  };
+
+  const guardarGasto = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const editing = editGasto;
+    const payload = {
+      ...gastoForm,
+      proveedor_cuit: gastoForm.proveedor_cuit || null,
+      letra: gastoForm.letra || null,
+      punto_venta: gastoForm.punto_venta || null,
+      numero: gastoForm.numero || null,
+      categoria: gastoForm.categoria || null,
+      importe_neto: Number(gastoForm.importe_neto || 0),
+      iva_pct: Number(gastoForm.iva_pct || 0),
+      percepciones: Number(gastoForm.percepciones || 0),
+      notas: gastoForm.notas || null,
+    };
+    try {
+      await apiJson<Gasto>(
+        editing ? `${CONTABILIDAD_API}/contabilidad/gastos-compras/${editing.id}` : `${CONTABILIDAD_API}/contabilidad/gastos-compras`,
+        { method: editing ? "PUT" : "POST", body: JSON.stringify(payload) }
+      );
+      setEditGasto(null);
+      setGastoForm(emptyGasto());
+      showToast(editing ? "Gasto actualizado" : "Gasto cargado");
+      fetchAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar el gasto", false);
+    }
+  };
+
+  const eliminarGasto = async (id: number) => {
+    if (!window.confirm("Eliminar gasto?")) return;
+    await fetch(`${CONTABILIDAD_API}/contabilidad/gastos-compras/${id}`, { method: "DELETE", headers: authHeaders() });
+    fetchAll();
+  };
+
+  const guardarAjuste = async () => {
+    try {
+      await apiJson<AjusteIva>(`${CONTABILIDAD_API}/contabilidad/ajustes-iva/${periodo}`, {
+        method: "PUT",
+        body: JSON.stringify({ otros_creditos: Number(ajuste.otros_creditos || 0), notas: ajuste.notas || null }),
+      });
+      showToast("Ajuste de IVA guardado");
+      fetchAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "No se pudo guardar ajuste", false);
+    }
+  };
+
+  const exportCsv = async () => {
+    const res = await fetch(`${CONTABILIDAD_API}/contabilidad/exportaciones/iva/${periodo}.csv`, { headers: authHeaders() });
+    if (!res.ok) {
+      showToast("No se pudo exportar CSV", false);
+      return;
+    }
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `docya-iva-${periodo}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const startEditObligacion = (o: Obligacion) => {
+    setEditObligacion(o);
+    setObligacionForm({ ...o });
+  };
+
+  const startEditComprobante = (c: Comprobante) => {
+    setEditComprobante(c);
+    setComprobanteForm({
+      fecha: c.fecha,
+      tipo_comprobante: c.tipo_comprobante,
+      letra: c.letra,
+      punto_venta: c.punto_venta,
+      numero: c.numero,
+      receptor_nombre: c.receptor_nombre,
+      receptor_documento: c.receptor_documento ?? "",
+      condicion_iva_receptor: c.condicion_iva_receptor ?? "",
+      concepto: c.concepto,
+      importe_neto: c.importe_neto,
+      iva_pct: c.iva_pct,
+      cae: c.cae ?? "",
+      cae_vencimiento: c.cae_vencimiento,
+      estado: c.estado,
+      notas: c.notas ?? "",
+    });
+  };
+
+  const startEditGasto = (g: Gasto) => {
+    setEditGasto(g);
+    setGastoForm({
+      fecha: g.fecha,
+      proveedor_nombre: g.proveedor_nombre,
+      proveedor_cuit: g.proveedor_cuit ?? "",
+      tipo_comprobante: g.tipo_comprobante,
+      letra: g.letra ?? "",
+      punto_venta: g.punto_venta,
+      numero: g.numero,
+      concepto: g.concepto,
+      categoria: g.categoria ?? "",
+      importe_neto: g.importe_neto,
+      iva_pct: g.iva_pct,
+      percepciones: g.percepciones,
+      deducible_iva: g.deducible_iva,
+      notas: g.notas ?? "",
+    });
   };
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--main-bg)" }}>
       <Sidebar />
-
       <main className="flex-1 overflow-y-auto px-4 py-8 pt-20 md:px-8 md:pt-8">
-        {/* HEADER */}
         <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <div className="mb-2 flex items-center gap-2">
-              <span className="badge badge-teal">Contabilidad</span>
-            </div>
-            <h1 className="text-3xl font-black" style={{ color: "var(--text-primary)" }}>
-              {tab === "vencimientos" ? "Calendario de vencimientos" : "Libro de consultas"}
+            <span className="badge badge-teal">DocYa SAS</span>
+            <h1 className="mt-3 text-3xl font-black" style={{ color: "var(--text-primary)" }}>
+              Contabilidad
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed" style={{ color: "var(--text-muted)" }}>
-              {tab === "vencimientos"
-                ? "Seguimiento de los vencimientos impositivos y contables de DocYa SAS (IVA, cargas sociales, Ingresos Brutos, Ganancias, balance anual). Pensado como recordatorio interno: la presentacion ante ARCA / AGIP la sigue haciendo el contador."
-                : "Registro de consultas facturadas, con el calculo automatico de comision DocYa, comision de Mercado Pago e IVA (debito y credito) para estimar cuanto corresponde declarar a ARCA."}
+              Carga manual de consultas, comprobantes, gastos y vencimientos para armar el resumen mensual que revisa el contador antes de entrar a ARCA.
             </p>
           </div>
-          {tab === "vencimientos" && (
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <TextInput type="month" value={periodo} onChange={(e) => setPeriodo(e.target.value)} />
+            <SmallButton onClick={fetchAll} tone="muted"><RefreshCw size={15} className={loading ? "animate-spin" : ""} />Actualizar</SmallButton>
+            <SmallButton onClick={exportCsv} tone="primary"><Download size={15} />CSV IVA</SmallButton>
+          </div>
+        </div>
+
+        <div className="mb-5 flex flex-wrap gap-2">
+          {tabs.map((item) => {
+            const Icon = item.icon;
+            const active = tab === item.id;
+            return (
               <button
-                onClick={fetchObligaciones}
-                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
-                style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
+                key={item.id}
+                onClick={() => setTab(item.id)}
+                className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-bold transition"
+                style={{
+                  background: active ? "rgba(20,184,166,0.16)" : "rgba(255,255,255,0.04)",
+                  color: active ? "var(--brand-primary-light)" : "var(--text-muted)",
+                  border: `1px solid ${active ? "rgba(20,184,166,0.35)" : "var(--border-subtle)"}`,
+                }}
               >
-                <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-                Actualizar
+                <Icon size={16} />
+                {item.label}
               </button>
-              <button
-                onClick={() => setModal({ obligacion: null })}
-                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-bold transition hover:opacity-90"
-                style={{ background: "var(--brand-primary)", color: "#fff" }}
-              >
-                <Plus size={16} />
-                Nueva obligacion
-              </button>
+            );
+          })}
+        </div>
+
+        {tab === "arca" && (
+          <div className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Metric icon={ReceiptText} label="IVA debito" value={money(resumen?.iva_debito_total)} helper="Consultas manuales + comprobantes emitidos" />
+              <Metric icon={WalletCards} label="IVA credito" value={money(resumen?.iva_credito_total)} helper="MP + gastos + percepciones + ajustes" color="#60a5fa" />
+              <Metric icon={Calculator} label="A pagar estimado" value={money(resumen?.iva_a_pagar_estimado)} helper="Saldo tecnico positivo del periodo" color="#fbbf24" />
+              <Metric icon={CheckCircle2} label="Saldo a favor" value={money(resumen?.saldo_a_favor_estimado)} helper="Saldo tecnico negativo del periodo" color="#4ade80" />
             </div>
-          )}
-        </div>
 
-        {/* TABS */}
-        <div className="mb-6 inline-flex rounded-xl p-1" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-subtle)" }}>
-          <button
-            onClick={() => setTab("vencimientos")}
-            className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition"
-            style={tab === "vencimientos"
-              ? { background: "var(--brand-primary)", color: "#fff" }
-              : { color: "var(--text-muted)" }}
-          >
-            <CalendarClock size={15} />
-            Calendario de vencimientos
-          </button>
-          <button
-            onClick={() => setTab("libro")}
-            className="inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-bold transition"
-            style={tab === "libro"
-              ? { background: "var(--brand-primary)", color: "#fff" }
-              : { color: "var(--text-muted)" }}
-          >
-            <BookOpen size={15} />
-            Libro de consultas
-          </button>
-        </div>
+            <Card className="p-5">
+              <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>Resumen mensual {periodo}</h2>
+                  <p className="text-xs" style={{ color: "var(--text-muted)" }}>Base para revisar y trasladar al servicio vigente de ARCA.</p>
+                </div>
+                {checklist && (
+                  <span className={`badge ${checklist.listo_para_revisar ? "badge-green" : "badge-yellow"}`}>
+                    {checklist.listo_para_revisar ? "Listo para revisar" : "Con pendientes"}
+                  </span>
+                )}
+              </div>
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                <Metric icon={ReceiptText} label="Consultas cargadas" value={resumen?.consultas_cantidad ?? 0} helper={`Total pacientes ${money(resumen?.total_consultas_paciente)}`} />
+                <Metric icon={FileText} label="Comprobantes" value={resumen?.comprobantes_cantidad ?? 0} helper={`Debito extra ${money(resumen?.iva_debito_comprobantes)}`} />
+                <Metric icon={WalletCards} label="Gastos" value={resumen?.gastos_cantidad ?? 0} helper={`Credito gastos ${money(resumen?.iva_credito_gastos)}`} />
+              </div>
+              <div className="mt-5 grid gap-3 md:grid-cols-2">
+                <Field label="Otros creditos IVA / notas de credito">
+                  <TextInput value={ajuste.otros_creditos} onChange={(e) => setAjuste({ ...ajuste, otros_creditos: e.target.value })} type="number" min={0} step="0.01" />
+                </Field>
+                <Field label="Notas para el contador">
+                  <TextInput value={ajuste.notas ?? ""} onChange={(e) => setAjuste({ ...ajuste, notas: e.target.value })} placeholder="Ej: honorarios contador, ajustes, saldos..." />
+                </Field>
+              </div>
+              <div className="mt-3">
+                <SmallButton onClick={guardarAjuste} tone="success"><Save size={15} />Guardar ajuste</SmallButton>
+              </div>
+              {checklist && checklist.pendientes.length > 0 && (
+                <div className="mt-5 rounded-xl p-4" style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.24)" }}>
+                  <div className="mb-2 flex items-center gap-2 text-sm font-bold" style={{ color: "#fbbf24" }}>
+                    <AlertTriangle size={16} /> Pendientes antes de ARCA
+                  </div>
+                  <ul className="space-y-1 text-xs" style={{ color: "var(--text-muted)" }}>
+                    {checklist.pendientes.map((p) => <li key={p}>- {p}</li>)}
+                  </ul>
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
 
-        {tab === "libro" && <LibroConsultas />}
+        {tab === "consultas" && (
+          <div className="space-y-5">
+            <Card className="p-5">
+              <h2 className="mb-4 text-lg font-black" style={{ color: "var(--text-primary)" }}>Cargar consulta facturada</h2>
+              <form onSubmit={guardarConsulta} className="grid gap-3 md:grid-cols-5">
+                <Field label="Fecha"><TextInput type="date" value={consultaForm.fecha} onChange={(e) => setConsultaForm({ ...consultaForm, fecha: e.target.value })} required /></Field>
+                <Field label="Medico"><TextInput value={consultaForm.medico} onChange={(e) => setConsultaForm({ ...consultaForm, medico: e.target.value })} required /></Field>
+                <Field label="Tipo"><TextInput value={consultaForm.tipo} onChange={(e) => setConsultaForm({ ...consultaForm, tipo: e.target.value })} required /></Field>
+                <Field label="Precio paciente"><TextInput type="number" min={0} step="0.01" value={consultaForm.precio} onChange={(e) => setConsultaForm({ ...consultaForm, precio: e.target.value })} required /></Field>
+                <div className="flex items-end"><SmallButton type="submit" tone="primary"><Plus size={15} />Agregar</SmallButton></div>
+              </form>
+            </Card>
+            <DataTable
+              headers={["Fecha", "Medico", "Tipo", "Precio", "Comision DocYa", "IVA", ""]}
+              rows={consultas.map((r) => [
+                fmtFecha(r.fecha),
+                r.medico,
+                r.tipo,
+                money(r.precio),
+                pct(r.comision_docya_pct),
+                pct(r.iva_pct),
+                <SmallButton key={r.id} onClick={() => eliminarConsulta(r.id)} tone="danger" title="Eliminar"><Trash2 size={14} /></SmallButton>,
+              ])}
+              empty="No hay consultas cargadas en este periodo."
+            />
+          </div>
+        )}
+
+        {tab === "comprobantes" && (
+          <div className="space-y-5">
+            <Card className="p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>{editComprobante ? "Editar comprobante" : "Cargar comprobante emitido"}</h2>
+                {editComprobante && <SmallButton onClick={() => { setEditComprobante(null); setComprobanteForm(emptyComprobante()); }}><X size={14} />Cancelar</SmallButton>}
+              </div>
+              <form onSubmit={guardarComprobante} className="grid gap-3 md:grid-cols-4">
+                <Field label="Fecha"><TextInput type="date" value={comprobanteForm.fecha} onChange={(e) => setComprobanteForm({ ...comprobanteForm, fecha: e.target.value })} required /></Field>
+                <Field label="Tipo"><TextInput value={comprobanteForm.tipo_comprobante} onChange={(e) => setComprobanteForm({ ...comprobanteForm, tipo_comprobante: e.target.value })} required /></Field>
+                <Field label="Letra"><TextInput value={comprobanteForm.letra} onChange={(e) => setComprobanteForm({ ...comprobanteForm, letra: e.target.value })} required /></Field>
+                <Field label="Estado">
+                  <SelectInput value={comprobanteForm.estado} onChange={(e) => setComprobanteForm({ ...comprobanteForm, estado: e.target.value as Comprobante["estado"] })}>
+                    <option value="emitido">Emitido</option>
+                    <option value="borrador">Borrador</option>
+                    <option value="anulado">Anulado</option>
+                  </SelectInput>
+                </Field>
+                <Field label="Punto venta"><TextInput type="number" min={1} value={comprobanteForm.punto_venta} onChange={(e) => setComprobanteForm({ ...comprobanteForm, punto_venta: Number(e.target.value || 1) })} required /></Field>
+                <Field label="Numero"><TextInput type="number" min={1} value={comprobanteForm.numero} onChange={(e) => setComprobanteForm({ ...comprobanteForm, numero: Number(e.target.value || 1) })} required /></Field>
+                <Field label="Receptor"><TextInput value={comprobanteForm.receptor_nombre} onChange={(e) => setComprobanteForm({ ...comprobanteForm, receptor_nombre: e.target.value })} required /></Field>
+                <Field label="CUIT/DNI"><TextInput value={comprobanteForm.receptor_documento ?? ""} onChange={(e) => setComprobanteForm({ ...comprobanteForm, receptor_documento: e.target.value })} /></Field>
+                <Field label="Concepto"><TextInput value={comprobanteForm.concepto} onChange={(e) => setComprobanteForm({ ...comprobanteForm, concepto: e.target.value })} required /></Field>
+                <Field label="Neto"><TextInput type="number" min={0} step="0.01" value={comprobanteForm.importe_neto} onChange={(e) => setComprobanteForm({ ...comprobanteForm, importe_neto: e.target.value })} required /></Field>
+                <Field label="IVA %"><TextInput type="number" min={0} max={100} step="0.01" value={comprobanteForm.iva_pct} onChange={(e) => setComprobanteForm({ ...comprobanteForm, iva_pct: e.target.value })} required /></Field>
+                <Field label="CAE"><TextInput value={comprobanteForm.cae ?? ""} onChange={(e) => setComprobanteForm({ ...comprobanteForm, cae: e.target.value })} /></Field>
+                <div className="md:col-span-4"><SmallButton type="submit" tone="primary"><Save size={15} />Guardar comprobante</SmallButton></div>
+              </form>
+            </Card>
+            <DataTable
+              headers={["Fecha", "Comprobante", "Receptor", "Neto", "IVA debito", "Total", "Estado", ""]}
+              rows={comprobantes.map((c) => [
+                fmtFecha(c.fecha),
+                `${c.tipo_comprobante} ${c.letra} ${c.punto_venta}-${c.numero}`,
+                c.receptor_nombre,
+                money(c.importe_neto),
+                money(c.iva_debito),
+                money(c.importe_total),
+                c.estado,
+                <div key={c.id} className="flex gap-2"><SmallButton onClick={() => startEditComprobante(c)}><Pencil size={14} /></SmallButton><SmallButton onClick={() => eliminarComprobante(c.id)} tone="danger"><Trash2 size={14} /></SmallButton></div>,
+              ])}
+              empty="No hay comprobantes cargados en este periodo."
+            />
+          </div>
+        )}
+
+        {tab === "gastos" && (
+          <div className="space-y-5">
+            <Card className="p-5">
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-lg font-black" style={{ color: "var(--text-primary)" }}>{editGasto ? "Editar gasto" : "Cargar gasto / compra"}</h2>
+                {editGasto && <SmallButton onClick={() => { setEditGasto(null); setGastoForm(emptyGasto()); }}><X size={14} />Cancelar</SmallButton>}
+              </div>
+              <form onSubmit={guardarGasto} className="grid gap-3 md:grid-cols-4">
+                <Field label="Fecha"><TextInput type="date" value={gastoForm.fecha} onChange={(e) => setGastoForm({ ...gastoForm, fecha: e.target.value })} required /></Field>
+                <Field label="Proveedor"><TextInput value={gastoForm.proveedor_nombre} onChange={(e) => setGastoForm({ ...gastoForm, proveedor_nombre: e.target.value })} required /></Field>
+                <Field label="CUIT"><TextInput value={gastoForm.proveedor_cuit ?? ""} onChange={(e) => setGastoForm({ ...gastoForm, proveedor_cuit: e.target.value })} /></Field>
+                <Field label="Categoria"><TextInput value={gastoForm.categoria ?? ""} onChange={(e) => setGastoForm({ ...gastoForm, categoria: e.target.value })} /></Field>
+                <Field label="Concepto"><TextInput value={gastoForm.concepto} onChange={(e) => setGastoForm({ ...gastoForm, concepto: e.target.value })} required /></Field>
+                <Field label="Neto"><TextInput type="number" min={0} step="0.01" value={gastoForm.importe_neto} onChange={(e) => setGastoForm({ ...gastoForm, importe_neto: e.target.value })} required /></Field>
+                <Field label="IVA %"><TextInput type="number" min={0} max={100} step="0.01" value={gastoForm.iva_pct} onChange={(e) => setGastoForm({ ...gastoForm, iva_pct: e.target.value })} required /></Field>
+                <Field label="Percepciones"><TextInput type="number" min={0} step="0.01" value={gastoForm.percepciones} onChange={(e) => setGastoForm({ ...gastoForm, percepciones: e.target.value })} /></Field>
+                <label className="flex items-center gap-2 text-sm" style={{ color: "var(--text-primary)" }}>
+                  <input type="checkbox" checked={gastoForm.deducible_iva} onChange={(e) => setGastoForm({ ...gastoForm, deducible_iva: e.target.checked })} />
+                  IVA computable
+                </label>
+                <div className="md:col-span-4"><SmallButton type="submit" tone="primary"><Save size={15} />Guardar gasto</SmallButton></div>
+              </form>
+            </Card>
+            <DataTable
+              headers={["Fecha", "Proveedor", "Concepto", "Neto", "IVA credito", "Percepciones", "Total", ""]}
+              rows={gastos.map((g) => [
+                fmtFecha(g.fecha),
+                g.proveedor_nombre,
+                g.concepto,
+                money(g.importe_neto),
+                money(g.iva_credito),
+                money(g.percepciones),
+                money(g.importe_total),
+                <div key={g.id} className="flex gap-2"><SmallButton onClick={() => startEditGasto(g)}><Pencil size={14} /></SmallButton><SmallButton onClick={() => eliminarGasto(g.id)} tone="danger"><Trash2 size={14} /></SmallButton></div>,
+              ])}
+              empty="No hay gastos cargados en este periodo."
+            />
+          </div>
+        )}
 
         {tab === "vencimientos" && (
-        <>
-        {/* DISCLAIMER */}
-        <div
-          className="mb-6 flex items-start gap-3 rounded-2xl p-4"
-          style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)" }}
-        >
-          <AlertTriangle size={18} style={{ color: "#fbbf24" }} className="mt-0.5 shrink-0" />
-          <p className="text-xs leading-relaxed" style={{ color: "var(--text-muted)" }}>
-            Las fechas de vencimiento de ARCA y AGIP cambian cada año segun la terminacion del CUIT y el
-            cronograma oficial vigente. Los dias precargados son orientativos: revisalos con tu contador y
-            ajustalos en cada obligacion (boton <Pencil size={12} className="inline" />) para que el aviso sea exacto.
-          </p>
-        </div>
+          <div className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Metric icon={AlertTriangle} label="Vencidos" value={vencidos} helper="Sin marcar como presentados" color="#f87171" />
+              <Metric icon={Bell} label="Urgentes" value={urgentes} helper="Vencen dentro de 3 dias" color="#fbbf24" />
+              <Metric icon={CalendarClock} label="Proximos" value={filasVencimientos.length} helper="Obligaciones activas" />
+              <Metric icon={Calculator} label="Inactivas" value={obligaciones.filter((o) => !o.activa).length} helper="No aparecen en calendario" color="#a78bfa" />
+            </div>
 
-        {/* SUMMARY CARDS */}
-        <section className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCard icon={AlertTriangle} label="Vencidos" value={vencidos} color="#f87171"
-            helper="Obligaciones con fecha ya pasada sin marcar como presentadas" />
-          <SummaryCard icon={Bell} label="Urgentes" value={urgentes} color="#fbbf24"
-            helper="Vencen dentro de los proximos 3 dias" />
-          <SummaryCard icon={CalendarClock} label="Proximos" value={proximos} color="var(--brand-primary-light)"
-            helper="Vencen entre 4 y 10 dias" />
-          <SummaryCard icon={Calculator} label="Obligaciones activas" value={activas} color="#a78bfa"
-            helper={`${inactivas.length} inactivas / sin aplicar todavia`} />
-        </section>
+            <Card className="p-5">
+              <h2 className="mb-4 text-lg font-black" style={{ color: "var(--text-primary)" }}>{editObligacion ? "Editar obligacion" : "Nueva obligacion"}</h2>
+              <form onSubmit={guardarObligacion} className="grid gap-3 md:grid-cols-5">
+                <Field label="Nombre"><TextInput value={obligacionForm.nombre} onChange={(e) => setObligacionForm({ ...obligacionForm, nombre: e.target.value })} required /></Field>
+                <Field label="Organismo"><TextInput value={obligacionForm.organismo} onChange={(e) => setObligacionForm({ ...obligacionForm, organismo: e.target.value })} required /></Field>
+                <Field label="Periodicidad">
+                  <SelectInput value={obligacionForm.periodicidad} onChange={(e) => setObligacionForm({ ...obligacionForm, periodicidad: e.target.value as Periodicidad })}>
+                    <option value="mensual">Mensual</option>
+                    <option value="anual">Anual</option>
+                  </SelectInput>
+                </Field>
+                <Field label="Dia"><TextInput type="number" min={1} max={obligacionForm.periodicidad === "mensual" ? 28 : 31} value={obligacionForm.diaVencimiento} onChange={(e) => setObligacionForm({ ...obligacionForm, diaVencimiento: Number(e.target.value || 1) })} /></Field>
+                <div className="flex items-end gap-2"><SmallButton type="submit" tone="primary"><Save size={15} />Guardar</SmallButton>{editObligacion && <SmallButton onClick={() => { setEditObligacion(null); setObligacionForm(emptyObligacion()); }}>Cancelar</SmallButton>}</div>
+                <div className="md:col-span-5"><TextArea rows={2} value={obligacionForm.notas ?? ""} onChange={(e) => setObligacionForm({ ...obligacionForm, notas: e.target.value })} placeholder="Notas, cronograma, contador..." /></div>
+              </form>
+            </Card>
 
-        {/* LISTADO */}
-        <section className="mb-6 rounded-2xl overflow-hidden" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
-          <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-            <h2 className="text-sm font-black" style={{ color: "var(--text-primary)" }}>Proximos vencimientos</h2>
+            <DataTable
+              headers={["Obligacion", "Organismo", "Periodo", "Vence", "Estado", ""]}
+              rows={filasVencimientos.map(({ obligacion, periodo: per, fecha, estado }) => [
+                obligacion.nombre,
+                obligacion.organismo,
+                periodoLabel(per, obligacion.periodicidad),
+                fmtFecha(fecha),
+                <span key={`${obligacion.id}-estado`} className={`badge ${toneClass(estado.tone)}`}>{estado.label}</span>,
+                <div key={obligacion.id} className="flex flex-wrap gap-2">
+                  <SmallButton onClick={() => marcarCumplido(obligacion, per)} tone="success"><CheckCircle2 size={14} />Presentada</SmallButton>
+                  <SmallButton onClick={() => startEditObligacion(obligacion)}><Pencil size={14} /></SmallButton>
+                  <SmallButton onClick={() => eliminarObligacion(obligacion)} tone="danger"><Trash2 size={14} /></SmallButton>
+                </div>,
+              ])}
+              empty="No hay vencimientos activos."
+            />
           </div>
-
-          {loading ? (
-            <div className="px-5 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>
-              Cargando obligaciones...
-            </div>
-          ) : filas.length === 0 ? (
-            <div className="px-5 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>
-              No hay obligaciones activas. Agrega una con &quot;Nueva obligacion&quot;.
-            </div>
-          ) : (
-            <div className="divide-y" style={{ borderColor: "var(--border-subtle)" }}>
-              {filas.map(({ obligacion, fecha, periodo, estado }) => (
-                <div key={obligacion.id} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between" style={{ borderColor: "var(--border-subtle)" }}>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>{obligacion.nombre}</p>
-                      <span className="badge badge-blue">{obligacion.organismo}</span>
-                      <span className={`badge ${toneClass(estado.tone)}`}>{estado.label}</span>
-                    </div>
-                    <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>
-                      {periodoLabel(periodo, obligacion.periodicidad)} · vence el {fmtFecha(fecha)}
-                      {obligacion.notas ? ` · ${obligacion.notas}` : ""}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <button
-                      onClick={() => marcarCumplido(obligacion, periodo)}
-                      title="Marcar como presentada/pagada para este periodo"
-                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition hover:opacity-80"
-                      style={{ background: "rgba(34,197,94,0.12)", color: "#4ade80", border: "1px solid rgba(34,197,94,0.25)" }}
-                    >
-                      <CheckCircle2 size={14} />
-                      Presentada
-                    </button>
-                    <button
-                      onClick={() => setModal({ obligacion })}
-                      title="Editar"
-                      className="rounded-lg p-1.5 transition hover:opacity-80"
-                      style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      onClick={() => setConfirmDelete(obligacion)}
-                      title="Eliminar"
-                      className="rounded-lg p-1.5 transition hover:opacity-80"
-                      style={{ background: "rgba(239,68,68,0.08)", color: "#f87171", border: "1px solid rgba(239,68,68,0.2)" }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* INACTIVAS */}
-        {inactivas.length > 0 && (
-          <section className="rounded-2xl overflow-hidden" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
-            <div className="px-5 py-4" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
-              <h2 className="text-sm font-black" style={{ color: "var(--text-primary)" }}>Inactivas / sin aplicar todavia</h2>
-              <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>
-                No aparecen en el calendario ni generan avisos. Activalas cuando correspondan (por ejemplo,
-                anticipos de Ganancias luego de la primera DDJJ anual).
-              </p>
-            </div>
-            <div className="divide-y" style={{ borderColor: "var(--border-subtle)" }}>
-              {inactivas.map((o) => (
-                <div key={o.id} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <p className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>{o.nombre}</p>
-                      <span className="badge badge-blue">{o.organismo}</span>
-                    </div>
-                    {o.notas && <p className="mt-1 text-xs" style={{ color: "var(--text-muted)" }}>{o.notas}</p>}
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <button
-                      onClick={() => toggleActiva(o)}
-                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-bold transition hover:opacity-80"
-                      style={{ background: "rgba(20,184,166,0.12)", color: "var(--brand-primary-light)", border: "1px solid rgba(20,184,166,0.25)" }}
-                    >
-                      Activar
-                    </button>
-                    <button
-                      onClick={() => setModal({ obligacion: o })}
-                      title="Editar"
-                      className="rounded-lg p-1.5 transition hover:opacity-80"
-                      style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    <button
-                      onClick={() => setConfirmDelete(o)}
-                      title="Eliminar"
-                      className="rounded-lg p-1.5 transition hover:opacity-80"
-                      style={{ background: "rgba(239,68,68,0.08)", color: "#f87171", border: "1px solid rgba(239,68,68,0.2)" }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-        </>
         )}
       </main>
-
-      {modal && (
-        <ObligacionModal
-          initial={modal.obligacion}
-          onClose={() => setModal(null)}
-          onSave={guardarObligacion}
-        />
-      )}
-
-      {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="w-full max-w-sm rounded-xl p-6 space-y-4" style={{ background: "var(--card-bg)", border: "1px solid var(--border-subtle)" }}>
-            <h2 className="font-semibold text-lg" style={{ color: "var(--text-primary)" }}>Eliminar obligacion</h2>
-            <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-              ¿Eliminar &quot;{confirmDelete.nombre}&quot;? Esta accion no se puede deshacer.
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setConfirmDelete(null)}
-                className="rounded-xl px-4 py-2 text-sm font-bold transition hover:opacity-80"
-                style={{ background: "rgba(255,255,255,0.04)", color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={() => eliminarObligacion(confirmDelete)}
-                className="inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold transition hover:opacity-90"
-                style={{ background: "#ef4444", color: "#fff" }}
-              >
-                <Trash2 size={16} />
-                Eliminar
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {toast && (
         <div
@@ -734,5 +982,30 @@ export default function ContabilidadPage() {
         </div>
       )}
     </div>
+  );
+}
+
+function DataTable({ headers, rows, empty }: { headers: string[]; rows: React.ReactNode[][]; empty: string }) {
+  return (
+    <Card className="overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="data-table min-w-full">
+          <thead>
+            <tr>
+              {headers.map((h) => <th key={h}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 ? (
+              <tr><td colSpan={headers.length} className="text-center">{empty}</td></tr>
+            ) : rows.map((row, idx) => (
+              <tr key={idx}>
+                {row.map((cell, i) => <td key={i}>{cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
