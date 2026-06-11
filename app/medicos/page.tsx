@@ -51,7 +51,37 @@ type Medico = {
   reputacion_promedio?: number;
   reputacion_total?: number;
   platform?: string | null;
+  atiende_adultos?: boolean;
+  atiende_pediatria?: boolean;
+  provincias_habilitadas?: string[] | null;
 };
+
+const PROVINCIAS_ARGENTINA = [
+  "Buenos Aires",
+  "Ciudad Autónoma de Buenos Aires",
+  "Catamarca",
+  "Chaco",
+  "Chubut",
+  "Córdoba",
+  "Corrientes",
+  "Entre Ríos",
+  "Formosa",
+  "Jujuy",
+  "La Pampa",
+  "La Rioja",
+  "Mendoza",
+  "Misiones",
+  "Neuquén",
+  "Río Negro",
+  "Salta",
+  "San Juan",
+  "San Luis",
+  "Santa Cruz",
+  "Santa Fe",
+  "Santiago del Estero",
+  "Tierra del Fuego",
+  "Tucumán",
+];
 
 function isOnline(ping?: string | null): boolean {
   if (!ping) return false;
@@ -104,10 +134,6 @@ function estadoProfesional(m: Medico) {
 
 function estaHabilitado(m: Medico): boolean {
   return estadoProfesional(m).label === "Habilitado";
-}
-
-function estaIncompleto(m: Medico): boolean {
-  return estadoProfesional(m).label === "Registro incompleto";
 }
 
 function ReputationStars({
@@ -251,7 +277,7 @@ export default function MedicosPage() {
   const totalEnfermeros = medicos.filter((m) => m.tipo === "enfermero").length;
   const totalOnline = medicos.filter((m) => isOnline(m.ultimo_ping)).length;
   const totalValidados = medicos.filter(estaHabilitado).length;
-  const totalIncompletos = medicos.filter(estaIncompleto).length;
+  const totalIncompletos = medicos.filter((m) => !m.perfil_completo).length;
 
   return (
     <div className="flex min-h-screen" style={{ background: "var(--bg-base)" }}>
@@ -689,7 +715,7 @@ export default function MedicosPage() {
             <h2 className="mb-5 text-lg font-semibold" style={{ color: "var(--text-primary)" }}>
               Editar — {editarMedico.full_name}
             </h2>
-            <div className="space-y-3">
+            <div className="max-h-[70vh] space-y-3 overflow-y-auto pr-1">
               {[
                 { key: "full_name", label: "Nombre completo" },
                 { key: "email", label: "Email" },
@@ -709,6 +735,69 @@ export default function MedicosPage() {
                   />
                 </div>
               ))}
+
+              <div>
+                <label className="mb-1 block text-xs" style={{ color: "var(--text-muted)" }}>
+                  Tipo de consultas que atiende
+                </label>
+                <div className="flex flex-col gap-2">
+                  <label className="flex items-center gap-2 text-sm" style={{ color: "var(--text-primary)" }}>
+                    <input
+                      type="checkbox"
+                      checked={editarMedico.atiende_adultos ?? true}
+                      onChange={(e) =>
+                        setEditarMedico({ ...editarMedico, atiende_adultos: e.target.checked })
+                      }
+                    />
+                    Atiende adultos
+                  </label>
+                  <label className="flex items-center gap-2 text-sm" style={{ color: "var(--text-primary)" }}>
+                    <input
+                      type="checkbox"
+                      checked={editarMedico.atiende_pediatria ?? false}
+                      onChange={(e) =>
+                        setEditarMedico({ ...editarMedico, atiende_pediatria: e.target.checked })
+                      }
+                    />
+                    Atiende pediatría
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block text-xs" style={{ color: "var(--text-muted)" }}>
+                  Provincias habilitadas (matrícula) — vacío = sin restricción
+                </label>
+                <div className="grid grid-cols-2 gap-1">
+                  {PROVINCIAS_ARGENTINA.map((prov) => {
+                    const seleccionadas = editarMedico.provincias_habilitadas || [];
+                    const checked = seleccionadas.includes(prov);
+                    return (
+                      <label
+                        key={prov}
+                        className="flex items-center gap-2 text-xs"
+                        style={{ color: "var(--text-primary)" }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const actuales = editarMedico.provincias_habilitadas || [];
+                            const nuevas = e.target.checked
+                              ? [...actuales, prov]
+                              : actuales.filter((p) => p !== prov);
+                            setEditarMedico({
+                              ...editarMedico,
+                              provincias_habilitadas: nuevas.length > 0 ? nuevas : null,
+                            });
+                          }}
+                        />
+                        {prov}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <button onClick={() => setEditarMedico(null)} className="btn-ghost">
